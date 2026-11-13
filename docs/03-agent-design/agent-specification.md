@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-AGENT-001 |
-| 版本 | V0.1 |
+| 版本 | V0.2 |
 | 日期 | 2026-11-13 |
-| 状态 | 基线文档 |
+| 状态 | 接口契约已实现（第 1 周） |
 | 项目 | AI Newsroom 智能新闻编辑部 |
 | 关联文档 | [PRD](../01-requirements/PRD.md)、[系统架构](../02-architecture/system-architecture.md)、[工作流设计](../04-workflow/workflow-design.md)、[状态设计](../05-data-design/state-schema.md) |
 
@@ -458,3 +458,45 @@ flowchart TD
 | [publisher-agent.md](publisher-agent.md) | 审核发布工程细化 |
 
 发生冲突时，以本文档定义的职责边界与枚举取值为准，详细文档补充实现细节。
+
+---
+
+## 10. 工程接口契约（V0.2）
+
+第 1 周已将五个 Agent（主编拆分为「规划」和「审核」两个工作流节点）的输入输出固化为 Pydantic 模型，Agent 实现将在第 2 周基于这些契约开发。
+
+### 10.1 契约位置
+
+| 内容 | 路径 |
+| --- | --- |
+| 输入 / 输出契约、契约注册表 | `backend/app/agents/contracts.py` |
+| Agent 抽象基类 | `backend/app/agents/base.py` |
+| 契约引用的领域模型 | `backend/app/schemas/domain.py` |
+| 枚举定义 | `backend/app/schemas/enums.py` |
+
+### 10.2 节点契约
+
+| 工作流节点 | 输入模型 | 输出模型 | 关键约束 |
+| --- | --- | --- | --- |
+| `chief_planning` | `ChiefPlanningInput` | `ChiefPlanningOutput` | 成功时必须输出 `editorial_plan`，下一节点固定为 `reporter` |
+| `reporter` | `ReporterInput` | `ReporterOutput` | 成功时必须包含初稿、至少一条来源和资料总结；来源 URL 必须是 HTTP(S) |
+| `editor` | `EditorInput` | `EditorOutput` | 成功时必须包含编辑稿、编辑说明和新版本号；版本号 ≥ 2 |
+| `fact_checker` | `FactCheckerInput` | `FactCheckerOutput` | 输入必须带 `article_id` 和 `article_version`；成功输出必须回显两者，用于绑定核查报告 |
+| `chief_review` | `ChiefReviewInput` | `ChiefReviewOutput` | `REQUEST_EDIT` 必须携带 `target=editor` 的修改要求；`REQUEST_RESEARCH` 必须携带 `target=reporter` 的补充资料要求；`APPROVE` 不得携带修改要求 |
+| `publisher` | `PublisherInput` | `PublisherOutput` | 输入要求 `chief_decision=APPROVE` 且核查结果不为 `FAILED`；输出默认 `PENDING_PUBLISH`，不直接发布 |
+
+### 10.3 通用约束
+
+1. 所有契约模型继承 `StrictModel`，未知字段直接拒绝（`extra="forbid"`）。
+2. `AgentOutput.status=FAILED` 时必须提供 `error`；`COMPLETED` 时不得携带 `error`。
+3. 成功输出必须包含该 Agent 的核心业务字段；失败输出允许只携带错误信息。
+4. 主编审核的退回要求必须是结构化 `RevisionRequest`，不能只有自然语言描述。
+5. 事实核查只输出证据与结论，不修改稿件、不决定发布；核查报告由工作流绑定到具体稿件版本。
+6. 发布前置条件在契约层校验，但主编 `APPROVE` 仍不等于正式发布，用户确认由发布流程单独处理。
+7. `AGENT_CONTRACTS` 注册了六个节点契约，供工作流注册、测试和后续契约校验复用。
+
+### 10.4 实现状态
+
+- 第 1 周：完成输入输出契约、枚举、领域模型和契约测试；
+- 第 2 周：实现 Reporter、Editor、Fact Checker、Chief Editor、Publisher 的具体逻辑与 Prompt；
+- 第 3 周：将节点接入 LangGraph，并由工作流负责状态更新、路由和错误重试。

@@ -3,12 +3,12 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-STATE-001 |
-| 文档版本 | V0.1 |
+| 文档版本 | V0.2 |
 | 数据库 | MySQL |
 | 状态管理 | LangGraph State |
 | 数据校验 | Pydantic |
 | 日期 | 2026-11-13 |
-| 状态 | 基线文档 |
+| 状态 | 已实现（第 1 周） |
 | 关联文档 | [数据库设计](database-design.md)、[工作流设计](../04-workflow/workflow-design.md)、[Agent 设计](../03-agent-design/agent-specification.md) |
 
 ---
@@ -136,8 +136,12 @@ erDiagram
 | `editorial_plan` | dict | 主编采编计划 | 主编 |
 | `research_sources` | list | 新闻资料来源 | 记者 |
 | `research_summary` | str | 资料搜集总结 | 记者 |
+| `unverified_claims` | list | 记者标记的待核实断言 | 记者 |
 | `draft_article` | dict | 记者初稿 | 记者 |
 | `edited_article` | dict | 编辑后的稿件 | 编辑 |
+| `editing_report` | dict | 编辑说明 | 编辑 |
+| `article_id` | str | 稿件编号 | 工作流 / 编辑 |
+| `article_version` | int | 当前稿件版本号 | 工作流 / 编辑 |
 | `fact_check_report` | dict | 事实核查报告 | 事实核查 |
 | `chief_decision` | str | 主编审核决策 | 主编 |
 | `review_comments` | str | 审核意见 | 主编 / 人工 |
@@ -150,8 +154,10 @@ erDiagram
 | `execution_logs` | list | 执行记录 | 各节点 |
 | `publication` | dict | 发布信息 | 审核发布 |
 | `error` | dict \| None | 错误信息 | 工作流 |
+| `created_at` | datetime | 任务创建时间 | 创建任务 |
+| `updated_at` | datetime | 最近更新时间 | 服务层 |
 
-### 3.3 TypedDict 定义
+### 3.3 TypedDict 定义（V0.1 基线）
 
 ```python
 from typing import TypedDict, Optional
@@ -203,6 +209,8 @@ class NewsTaskState(TypedDict, total=False):
 ```
 
 > 实际项目中，应对 `editorial_plan`、`draft_article`、`edited_article`、`fact_check_report` 等字段建立独立的 Pydantic `BaseModel`，避免使用过多未经约束的字典。
+
+> **V0.2 实现说明**：`backend/app/graph/state.py` 中的 `NewsTaskState` 采用 Pydantic `BaseModel`，以便 FastAPI 序列化、节点输入校验和后续 LangGraph 集成；字段集合以上表为准，嵌套字段均使用独立 Pydantic 模型。
 
 ### 3.4 Pydantic 模型（建议）
 
@@ -267,6 +275,25 @@ class Publication(BaseModel):
     external_url: str | None = None
     message: str | None = None
 ```
+
+### 3.5 工程实现与不变量（V0.2）
+
+第 1 周实现位置：
+
+| 内容 | 模块 |
+| --- | --- |
+| 共享状态 `NewsTaskState` | `backend/app/graph/state.py` |
+| 枚举（任务状态、决策、核查结果等） | `backend/app/schemas/enums.py` |
+| 领域模型（采编计划、来源、稿件、核查报告、发布记录） | `backend/app/schemas/domain.py` |
+| 严格模型基类（`extra="forbid"`） | `backend/app/schemas/base.py` |
+| 内存任务存储（第 4 周替换为 MySQL） | `backend/app/services/task_store.py` |
+
+模型层强制以下不变量：
+
+1. **核查绑定版本**：存在 `fact_check_report` 时，必须同时提供 `article_id` 和 `article_version`，且报告内的稿件 ID、版本号必须与状态一致；稿件修改后旧核查报告不能继续沿用。
+2. **发布必须确认**：`publication.status = PUBLISHED` 或 `task_status = PUBLISHED` 时，`user_confirmation` 必须为 `True`，且存在已发布的发布记录。
+3. **失败输出必须带错误**：Agent 输出状态为 `FAILED` 时必须包含 `error`；状态为 `COMPLETED` 时不得携带 `error`。
+4. **未知字段拒绝**：所有状态与契约模型 `extra="forbid"`，防止模型输出或请求中出现未约定字段。
 
 ---
 
