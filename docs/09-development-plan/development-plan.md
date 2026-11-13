@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-PLAN-001 |
-| 文档版本 | V0.2 |
+| 文档版本 | V0.3 |
 | 计划周期 | 6 周（可按实际时间压缩，但不压缩核心工作流测试） |
-| 日期 | 2026-11-13 |
+| 日期 | 2026-11-14 |
 | 状态 | 基线文档 |
 | 关联文档 | [PRD](../01-requirements/PRD.md)、[系统架构](../02-architecture/system-architecture.md)、[工作流设计](../04-workflow/workflow-design.md)、[状态设计](../05-data-design/state-schema.md)、[Agent 设计](../03-agent-design/agent-specification.md) |
 
@@ -311,7 +311,7 @@ flowchart TD
 
 **待验证 / 后续**
 
-- 搜索 API Key 尚未配置（健康检查 `search_configured=false`），在第二周实现 Reporter 前补齐；
+- 搜索 API Key 尚未配置（健康检查 `search_configured=false`），在第二周实现 Reporter 前补齐（已于 2026-11-14 补齐）；
 - MySQL 表结构落地与持久化安排在第四周，本周任务存储为进程内存实现；
 - Agent 业务逻辑从第二周开始实现。
 
@@ -332,6 +332,15 @@ flowchart TD
 
 **待验证 / 后续**
 
-- `SEARCH_API_KEY` 仍未配置，Reporter / Fact Checker 的真实联网运行前需配置 Tavily 密钥；
+- ~~`SEARCH_API_KEY` 仍未配置~~ → 已于 2026-11-14 配置并完成真实联网验证，见下方更新记录；
 - 主编 Agent、Publisher、LangGraph 编排与条件路由安排在第 3 周；
 - Agent 尚未通过 API 暴露执行接口，第 3 周随工作流一并接入。
+
+**2026-11-14 更新：真实联网链路验证**
+
+- Tavily 密钥配置完成（首轮用的 UUID 值被服务端判定 401，已替换为 `tvly-` 开头的正式密钥）；单次真实检索返回 3 条结果。
+- Reporter → Editor → Fact Checker 全链路使用真实 DeepSeek + 真实 Tavily 运行，三个 Agent 均 `COMPLETED`：
+  - Reporter 产出 12 条来源（`SRC_0001` ~ `SRC_0012`）、1080 字初稿、4 条未核实信息；
+  - Editor 产出版本 `2`；
+  - Fact Checker 报告绑定版本 `2`，8 条断言全部 `VERIFIED`，`PASSED` / `APPROVE`。
+- 该冒烟只验证链路与结构化输出，核查准确率仍需按测试计划第 8 节评测集评估。

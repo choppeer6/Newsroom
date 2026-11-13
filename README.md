@@ -2,7 +2,7 @@
 
 **AI Newsroom 智能新闻编辑部**：基于大语言模型和多智能体协作技术的智能新闻采编系统，实现新闻选题分析、资料搜集、新闻撰写、稿件编辑、事实核查和审核发布的半自动化流程。
 
-> 当前阶段：**第 2 周已完成**。已落地 `NewsTaskState`、Agent 接口契约、FastAPI 骨架，以及 Reporter、Editor、Fact Checker 三个 Agent 的结构化逻辑；主编 Agent 与 LangGraph 编排将在第 3 周接入。
+> 当前阶段：**第 2 周已完成**。已落地 `NewsTaskState`、Agent 接口契约、FastAPI 骨架，以及 Reporter、Editor、Fact Checker 三个 Agent 的结构化逻辑；真实 DeepSeek + Tavily 全链路已验证。主编 Agent 与 LangGraph 编排将在第 3 周接入。
 
 ## 项目基线
 
@@ -75,8 +75,8 @@ Newsroom/
 | 05 | 状态设计文档（NewsTaskState） | [docs/05-data-design/state-schema.md](docs/05-data-design/state-schema.md) | V0.2 |
 | 06 | API 接口设计文档 | [docs/06-api/api-specification.md](docs/06-api/api-specification.md) | V0.2 |
 | 07 | Prompt 与工具设计文档 | [docs/07-prompts/prompt-design.md](docs/07-prompts/prompt-design.md) | V0.2 |
-| 08 | 测试计划与验收文档 | [docs/08-testing/test-plan.md](docs/08-testing/test-plan.md) | V0.2 |
-| 09 | 开发实施计划（六周迭代） | [docs/09-development-plan/development-plan.md](docs/09-development-plan/development-plan.md) | V0.2 |
+| 08 | 测试计划与验收文档 | [docs/08-testing/test-plan.md](docs/08-testing/test-plan.md) | V0.3 |
+| 09 | 开发实施计划（六周迭代） | [docs/09-development-plan/development-plan.md](docs/09-development-plan/development-plan.md) | V0.3 |
 
 ## 开发路线
 

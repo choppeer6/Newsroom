@@ -15,6 +15,7 @@ FastAPI + LangGraph 后端服务。当前进度：**第 2 周（Reporter / Edito
 - OpenAI 兼容 LLM JSON 客户端（超时 / 429 / 5xx 有限重试）与 Tavily 搜索工具
 - YAML + Jinja2 Prompt 模板与共享输出 / 安全 / 来源规则
 - 80 个单元与接口测试
+- 真实 DeepSeek + Tavily 全链路验证：Reporter → Editor → Fact Checker 均 `COMPLETED`，核查报告绑定版本 2
 
 未实现：主编 Agent、LangGraph 编排、MySQL 持久化、JWT 认证（按六周计划推进）。
 

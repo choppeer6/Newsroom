@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-TEST-001 |
-| 文档版本 | V0.2 |
-| 日期 | 2026-11-13 |
-| 状态 | 第 2 周 Agent 单元测试已落地 |
+| 文档版本 | V0.3 |
+| 日期 | 2026-11-14 |
+| 状态 | 第 2 周 Agent 单元测试已落地，真实联网链路已验证 |
 | 关联文档 | [PRD](../01-requirements/PRD.md)、[工作流设计](../04-workflow/workflow-design.md)、[API 规范](../06-api/api-specification.md) |
 
 ---
@@ -239,5 +239,13 @@
 
 **未覆盖**
 
-- 真实 Tavily 检索（`SEARCH_API_KEY` 未配置）；
 - 主编 Agent、Publisher、LangGraph 路由与中断恢复（第 3 周起）。
+
+**真实联网验证（2026-11-14）**
+
+- `SEARCH_API_KEY`（Tavily）配置完成，`search_configured=true`；单次检索返回 3 条结果，URL 与摘要正常。
+- 全链路 Reporter → Editor → Fact Checker 使用真实 DeepSeek 与真实 Tavily：
+  - Reporter `COMPLETED`，12 条来源（`SRC_0001` ~ `SRC_0012`），初稿 1080 字，标记 4 条未核实信息；
+  - Editor `COMPLETED`，版本 `2`；
+  - Fact Checker `COMPLETED`，报告绑定版本 `2`，8 条断言全部 `VERIFIED`，`overall_result=PASSED`，`recommendation=APPROVE`。
+- 该结果仅证明链路与结构可用，不代表核查准确率；准确率以第 8 节评测集为准。
