@@ -304,12 +304,13 @@ flowchart TD
 - 五个 Agent 的输入 / 输出契约（主编拆分为规划、审核两个节点）及契约注册表；
 - FastAPI 骨架：统一响应、请求 ID、异常处理、CORS；
 - 任务创建 / 列表 / 详情 / 取消接口（内存存储）；
-- 40 个单元与接口测试全部通过；
+- 42 个单元与接口测试全部通过（含配置测试）；
 - 已通过 uvicorn 启动并实际请求 `/api/news/health` 验证服务可运行；
+- LLM 实际调用冒烟通过：DeepSeek `deepseek-chat`，HTTP 200，返回 `OK`，耗时约 1.2 秒；
 - State、Agent、API 设计文档同步至 V0.2。
 
 **待验证 / 后续**
 
-- LLM 实际调用冒烟测试需要配置 `LLM_API_KEY`，当前健康检查显示 `llm_configured=false`；
+- 搜索 API Key 尚未配置（健康检查 `search_configured=false`），在第二周实现 Reporter 前补齐；
 - MySQL 表结构落地与持久化安排在第四周，本周任务存储为进程内存实现；
 - Agent 业务逻辑从第二周开始实现。
