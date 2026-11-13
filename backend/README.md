@@ -53,6 +53,49 @@ uvicorn app.main:app --reload
 
 打开 http://127.0.0.1:8000/docs 查看接口文档。
 
+## LLM 与搜索配置
+
+配置从 `backend/.env` 读取，由 `app/core/config.py` 加载；`.env` 已被 Git 忽略。
+
+```bash
+cd backend
+cp .env.example .env
+```
+
+编辑 `.env`：
+
+```dotenv
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=gpt-4o
+
+SEARCH_PROVIDER=tavily
+SEARCH_API_KEY=tvly-...
+```
+
+也支持直接设置同名环境变量，环境变量优先级高于 `.env`。修改配置后需重启 uvicorn（配置有进程内缓存）。
+
+验证：
+
+```bash
+curl http://127.0.0.1:8000/api/news/health
+```
+
+`llm_configured` / `search_configured` 为 `true` 表示对应密钥已配置；空字符串会被视为未配置。
+
+```json
+{
+  "code": 0,
+  "data": {
+    "status": "ok",
+    "llm_configured": true,
+    "search_configured": true
+  }
+}
+```
+
+密钥只在服务端使用，不会通过接口返回；不要提交 `.env` 或把密钥写入代码。
+
 ## 测试
 
 ```bash

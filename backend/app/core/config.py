@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,13 @@ class Settings(BaseSettings):
 
     max_revision_rounds: int = Field(default=2, ge=0)
     max_concurrent_tasks: int = Field(default=10, ge=1)
+
+    @field_validator("llm_api_key", "search_api_key", mode="before")
+    @classmethod
+    def _blank_secret_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 @lru_cache
