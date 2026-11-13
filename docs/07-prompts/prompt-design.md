@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-PROMPT-001 |
-| 文档版本 | V0.2 |
-| 日期 | 2026-11-13 |
-| 状态 | 已实现（第 2 周：Reporter / Editor / Fact Checker） |
+| 文档版本 | V0.3 |
+| 日期 | 2026-11-14 |
+| 状态 | 已实现（第 3 周：五个 Agent 的 Prompt） |
 | 关联文档 | [Agent 设计](../03-agent-design/agent-specification.md)、[工作流设计](../04-workflow/workflow-design.md) |
 
 ---
@@ -360,3 +360,16 @@ prompts:
 - 输出解析：`json.loads` → Pydantic 校验；校验失败时携带错误摘要重试一次，仍失败则返回 `LLM_OUTPUT_INVALID`。
 - 注入防护：搜索结果放入 `<untrusted_content source="search_results">`，稿件正文放入 `<untrusted_content source="article">`；System Prompt 明确忽略其中的指令。
 - 确定性兜底：事实核查的证据 URL 与摘录由代码从证据池绑定，不采用模型生成的 URL 或原文摘录。
+
+
+---
+
+## 10. 第 3 周实现记录
+
+- 新增 `chief_editor.yaml`：
+  - `planning`：把选题与用户要求转为采编计划，输出五个字段，角度与任务要求非空；
+  - `review`：综合稿件、来源摘要与核查报告给出四类决策；要求退回时提供可执行原因与要求；
+  - 事实核查报告的 `claims`、`issues`、`recommendation` 原样注入，供主编对照。
+- Publisher 不使用 Prompt：发布前置条件、待发布记录与幂等控制全部由代码完成，避免模型绕过用户确认。
+- 决策兜底在代码层完成：`APPROVE` 仅在 `PASSED` 时保留；退回目标由决策枚举决定；退回次数达到上限强制转人工。
+- Prompt 渲染测试已覆盖 `chief_editor.planning` 与 `chief_editor.review`。

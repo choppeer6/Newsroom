@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-AGENT-001 |
-| 版本 | V0.3 |
-| 日期 | 2026-11-13 |
-| 状态 | 接口契约与三个 Agent 已实现（第 2 周） |
+| 版本 | V0.4 |
+| 日期 | 2026-11-14 |
+| 状态 | 五个 Agent 与工作流节点已实现（第 3 周） |
 | 项目 | AI Newsroom 智能新闻编辑部 |
 | 关联文档 | [PRD](../01-requirements/PRD.md)、[系统架构](../02-architecture/system-architecture.md)、[工作流设计](../04-workflow/workflow-design.md)、[状态设计](../05-data-design/state-schema.md) |
 
@@ -499,7 +499,7 @@ flowchart TD
 
 - 第 1 周：完成输入输出契约、枚举、领域模型和契约测试（已完成）；
 - 第 2 周：完成 Reporter、Editor、Fact Checker 的具体逻辑、Prompt 与测试（已完成）；
-- 第 3 周：实现 Chief Editor、Publisher，并将节点接入 LangGraph，由工作流负责状态更新、路由和错误重试。
+- 第 3 周：实现 Chief Editor（规划 / 审核）、Publisher，并接入 LangGraph；工作流负责状态更新、条件路由、退回循环、人工审核与发布确认（已完成）。
 
 ### 10.5 第 2 周实现要点（V0.3）
 
@@ -521,3 +521,24 @@ flowchart TD
 4. **核查结论由代码汇总**：存在 `CONTRADICTED` 时为 `FAILED`，全部 `VERIFIED` 时为 `PASSED`，其余为 `PARTIAL`；建议仅在全部通过时为 `APPROVE`。
 5. **失败不抛出**：三个 Agent 均以契约输出返回 `status=FAILED` 与结构化 `error`，由工作流决定重试或转人工。
 6. **Prompt 不硬编码**：Prompt 位于 YAML 文件，模型输出先经 Pydantic 校验，失败自动携带校验错误重试一次。
+
+### 10.6 第 3 周实现要点（V0.4）
+
+| 模块 | 位置 | 说明 |
+| --- | --- | --- |
+| 主编 | `backend/app/agents/chief_editor.py` | 规划节点输出采编计划；审核节点输出四类决策与结构化退回要求 |
+| 发布 | `backend/app/agents/publisher.py` | 校验审核与核查前置条件；未确认时只创建待发布记录 |
+| 模拟发布通道 | `backend/app/services/publish_service.py` | 按 `(article_id, version)` 幂等，可注入失败用于重试测试 |
+| 路由 | `backend/app/graph/routing.py` | 纯函数条件边，测试无需启动图 |
+| 节点 | `backend/app/graph/nodes.py` | 将 `NewsTaskState` 翻译为 Agent 输入，并写回状态与执行日志 |
+| 工作流 | `backend/app/graph/workflow.py` | 编译 LangGraph、内存检查点、`interrupt` 暂停与恢复封装 |
+
+新增的确定性约束：
+
+1. **批准必须有核查依据**：事实核查不是 `PASSED` 时，模型的 `APPROVE` 会被系统降级为 `HUMAN_REVIEW`。
+2. **退回目标由代码决定**：`REQUEST_EDIT` 固定为 `target=editor`，`REQUEST_RESEARCH` 固定为 `target=reporter`，模型只提供原因与要求。
+3. **循环有上限**：`retry_count` 达到 `max_retry` 后，任何退回决策都会强制转为 `HUMAN_REVIEW`，避免无限循环。
+4. **发布前置条件**：Publisher 只接受 `chief_decision=APPROVE` 且核查不为 `FAILED`；未确认只返回 `PENDING_PUBLISH`。
+5. **人工权限高于模型**：人工审核通过后，编排以 `APPROVE` 调用 Publisher，但状态中保留 `human_decision` 供追溯。
+6. **执行可追溯**：每个节点写入 `execution_logs`（Agent、状态、起止时间、摘要或错误）；失败即终止图并写 `FAILED` 状态。
+7. **契约补充**：`ChiefReviewInput` 增加 `requirements`，使审核能对照用户风格与篇幅要求。

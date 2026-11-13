@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-PLAN-001 |
-| 文档版本 | V0.3 |
+| 文档版本 | V0.4 |
 | 计划周期 | 6 周（可按实际时间压缩，但不压缩核心工作流测试） |
 | 日期 | 2026-11-14 |
 | 状态 | 基线文档 |
@@ -344,3 +344,29 @@ flowchart TD
   - Editor 产出版本 `2`；
   - Fact Checker 报告绑定版本 `2`，8 条断言全部 `VERIFIED`，`PASSED` / `APPROVE`。
 - 该冒烟只验证链路与结构化输出，核查准确率仍需按测试计划第 8 节评测集评估。
+
+---
+
+## 12. 第 3 周执行记录（2026-11-14）
+
+**已完成**
+
+- 主编 Agent（拆分为两个节点）：
+  - `chief_planning`：输出 `topic_analysis`、`reporting_angles`、`research_tasks`、`article_outline`、`verification_points`；
+  - `chief_review`：输出四种决策与结构化退回要求；`APPROVE` 仅在核查 `PASSED` 时保留；退回次数达到上限强制转人工。
+- Publisher Agent：校验 `APPROVE` 与核查状态；未确认时创建待发布记录；确认后调用按 `(article_id, version)` 幂等的模拟发布通道；通道失败保持 `PENDING_PUBLISH` 并允许重试。
+- LangGraph 编排：九个节点（`chief_planning`、`reporter`、`editor`、`fact_checker`、`chief_review`、`human_approval`、`publisher`、`user_confirmation`、`publish`）、条件路由、退回循环、`interrupt()` 人工审核与发布确认、`MemorySaver` 检查点、执行日志、失败即终止。
+- 测试：全量 `120 passed`，新增 40 项覆盖主编、Publisher、路由与工作流分支。
+- 真实冒烟：DeepSeek + Tavily 完整工作流从规划到 `PUBLISHED`（模拟发布地址）一次跑通。
+
+**实现说明**
+
+- 发布确认拆成独立节点，恢复时不会重复创建待发布记录；
+- `ChiefReviewInput` 增加 `requirements`，审核可对照用户风格与篇幅要求；
+- 待发布记录与正式发布均使用模拟通道，真实发布接口在第 5 周接入。
+
+**待验证 / 后续**
+
+- MySQL 持久化、持久化 Checkpointer 与进程重启恢复（第 4 周）；
+- 工作流执行 API（创建任务后触发、人工审核恢复、发布确认恢复）与并发控制（第 4 ~ 5 周）；
+- 前端页面与真实发布通道（第 5 周）。

@@ -3,10 +3,10 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-WF-001 |
-| 文档版本 | V0.1 |
+| 文档版本 | V0.2 |
 | 工作流框架 | LangGraph |
-| 日期 | 2026-11-13 |
-| 状态 | 基线文档 |
+| 日期 | 2026-11-14 |
+| 状态 | 已实现并接入内存检查点（第 3 周） |
 | 关联文档 | [Agent 设计](../03-agent-design/agent-specification.md)、[状态设计](../05-data-design/state-schema.md)、[API 规范](../06-api/api-specification.md) |
 
 > **关键原则**：Agent 的执行顺序与 Agent 的决策权不是一回事。
@@ -141,6 +141,7 @@ flowchart TD
 - **下一步**：用户确认后进入 `publish`；用户暂缓时不恢复图，任务保持待发布。
 - **状态**：`PENDING_PUBLISH`。
 - **约束**：只接受主编审核通过的稿件。
+- **实现说明**：第 3 周将「创建待发布记录」与「等待用户确认」拆成两个节点——`publisher` 创建待发布记录，`user_confirmation` 用 `interrupt()` 暂停，确认后进入 `publish`；未确认则结束并保持 `PENDING_PUBLISH`。见第 10 节。
 
 ### 3.7 人工审核节点（`human_approval`）
 
@@ -357,3 +358,68 @@ builder.add_edge("publish", END)
 
 graph = builder.compile(checkpointer=checkpointer)
 ```
+
+---
+
+## 10. 第 3 周实现记录（2026-11-14）
+
+### 10.1 实现位置
+
+| 内容 | 位置 |
+| --- | --- |
+| 条件路由 | `backend/app/graph/routing.py` |
+| 节点实现 | `backend/app/graph/nodes.py` |
+| 图组装与运行封装 | `backend/app/graph/workflow.py` |
+| 主编 / 发布 Agent | `backend/app/agents/chief_editor.py`、`backend/app/agents/publisher.py` |
+| 模拟发布通道 | `backend/app/services/publish_service.py` |
+
+### 10.2 实际图结构
+
+```mermaid
+flowchart LR
+    S([START]) --> CP[chief_planning]
+    CP -->|成功| R[reporter]
+    CP -->|失败| E([END])
+    R --> ED[editor]
+    ED --> FC[fact_checker]
+    FC --> CR[chief_review]
+    CR -->|APPROVE| P[publisher]
+    CR -->|REQUEST_EDIT| ED
+    CR -->|REQUEST_RESEARCH| R
+    CR -->|HUMAN_REVIEW| H[human_approval]
+    H -->|APPROVE| P
+    H -->|REQUEST_EDIT| ED
+    H -->|REQUEST_RESEARCH| R
+    H -->|TERMINATE| E
+    P --> UC[user_confirmation]
+    UC -->|确认| PUB[publish]
+    UC -->|暂缓| E
+    PUB --> E
+```
+
+### 10.3 与参考实现的差异
+
+1. **发布确认独立成节点**：`publisher` 只创建待发布记录，`user_confirmation` 负责 `interrupt()`，`publish` 负责调用发布通道；三者职责分开，恢复时不会重复执行 Publisher。
+2. **人工审核恢复值**：`{"decision": "...", "comments": "...", "revision_reason": "...", "revision_requirements": [...]}`，退回时校验原因与要求非空。
+3. **失败即终止**：任一 Agent 返回 `FAILED` 时，节点写入 `error`、`task_status=FAILED`、`current_stage=error`，路由直接到 `END`，不进入下一节点。
+4. **检查点**：使用 LangGraph `MemorySaver`，`thread_id = task_id`；进程重启后不保留，第 4 周替换为持久化 Checkpointer。
+5. **双重循环保护**：图编译设置 `recursion_limit=50`；退回次数达到 `MAX_REVISION_ROUNDS`（默认 2）时，主编节点把退回决策强制转为人审。
+6. **执行日志**：每个节点追加一条 `execution_logs`，记录 Agent、状态、起止时间、输出摘要或错误；日志随检查点一起保存。
+
+### 10.4 运行方式
+
+```python
+from app.graph.state import NewsTaskState
+from app.graph.workflow import NewsroomWorkflow
+
+workflow = NewsroomWorkflow()
+result = await workflow.run(NewsTaskState(task_id="TASK_001", topic="选题"))
+# result.interrupt 非空表示停在人工审核或发布确认
+result = await workflow.resume("TASK_001", {"confirm": True})
+```
+
+### 10.5 第 3 周验证结果
+
+- 自动化测试 120 项全部通过（新增 40 项：主编规划 / 审核、Publisher、路由、工作流分支与中断恢复）。
+- 真实 DeepSeek + Tavily 全链路冒烟：主编规划 5 个报道角度 → 记者 12 条来源 → 编辑版本 2 → 核查 8 条断言全部 `VERIFIED`（`PASSED`）→ 主编 `APPROVE` → 待发布 → 用户确认后 `PUBLISHED`（模拟发布地址）。
+- 尚未覆盖：真实发布通道、MySQL Checkpointer、中断后进程重启恢复、API 触发。
