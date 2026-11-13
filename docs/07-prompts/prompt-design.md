@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-PROMPT-001 |
-| 文档版本 | V0.1 |
+| 文档版本 | V0.2 |
 | 日期 | 2026-11-13 |
-| 状态 | 基线文档 |
+| 状态 | 已实现（第 2 周：Reporter / Editor / Fact Checker） |
 | 关联文档 | [Agent 设计](../03-agent-design/agent-specification.md)、[工作流设计](../04-workflow/workflow-design.md) |
 
 ---
@@ -25,44 +25,39 @@
 
 ```
 backend/app/prompts/
+├── loader.py                  # YAML 读取 + Jinja2 渲染
 ├── agents/
-│   ├── chief_planning.yaml
-│   ├── chief_review.yaml
-│   ├── reporter.yaml
-│   ├── editor.yaml
-│   ├── fact_checker.yaml
-│   └── publisher.yaml
-├── shared/
-│   ├── output_rules.yaml
-│   ├── safety_rules.yaml
-│   └── source_rules.yaml
-└── schemas/
-    ├── editorial_plan.json
-    ├── reporter_output.json
-    ├── editor_output.json
-    ├── fact_check_report.json
-    └── publication.json
+│   ├── reporter.yaml          # search_queries / write_draft
+│   ├── editor.yaml            # edit_article
+│   └── fact_checker.yaml      # extract_claims / verify_claims
+└── shared/
+    ├── output_rules.yaml
+    ├── safety_rules.yaml
+    └── source_rules.yaml
 ```
+
+主编与发布 Prompt 在第 3 周加入。结构化输出约束以 Pydantic 模型为准（各 Agent 内部的 Payload 模型与契约模型），不再维护单独的 JSON Schema 文件。
 
 **版本规则**
 
-- 每个文件维护 `version` 与 `changelog`；
-- 生产环境按 `prompt_key + version` 加载并激活；
+- 每个文件维护 `version`；生产环境按 `prompt_key + version` 加载并激活；
 - 变更流程：修改 → 离线评测 → 灰度 → 全量；
 - Prompt 不得硬编码在 Python 字符串中。
 
 ```yaml
-key: fact_checker
+key: reporter
 version: v1
-model:
-  temperature: 0.2
-  max_tokens: 4000
-system: |
-  ...
-user_template: |
-  ...
-output_schema: fact_check_report.json
+prompts:
+  write_draft:
+    temperature: 0.4
+    max_tokens: 4000
+    system: |
+      ...
+    user_template: |
+      ...
 ```
+
+加载器会将 `shared/` 下的输出、安全、来源规则追加到各 Agent 的 System Prompt；模板使用 `StrictUndefined`，缺少变量会直接报错而不是静默渲染空值。
 
 ---
 
@@ -355,3 +350,13 @@ output_schema: fact_check_report.json
 | 灰度 | 10% → 50% → 100% |
 | 回滚 | 保留上一激活版本 |
 | 记录 | 每次调用记录 prompt_key/version、模型、token、耗时 |
+
+---
+
+## 9. 第 2 周实现记录
+
+- 已实现 Prompt：Reporter 的 `search_queries` / `write_draft`，Editor 的 `edit_article`，Fact Checker 的 `extract_claims` / `verify_claims`。
+- 渲染方式：`app/prompts/loader.py` 读取 YAML，Jinja2 关闭自动转义并使用 `StrictUndefined`。
+- 输出解析：`json.loads` → Pydantic 校验；校验失败时携带错误摘要重试一次，仍失败则返回 `LLM_OUTPUT_INVALID`。
+- 注入防护：搜索结果放入 `<untrusted_content source="search_results">`，稿件正文放入 `<untrusted_content source="article">`；System Prompt 明确忽略其中的指令。
+- 确定性兜底：事实核查的证据 URL 与摘录由代码从证据池绑定，不采用模型生成的 URL 或原文摘录。

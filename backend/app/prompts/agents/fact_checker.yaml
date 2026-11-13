@@ -1,0 +1,49 @@
+key: fact_checker
+version: v1
+prompts:
+  extract_claims:
+    temperature: 0.1
+    max_tokens: 1200
+    system: |
+      你是独立事实核查员。只抽取稿件中可以被外部证据验证的具体断言。
+      1. 覆盖人物、时间、地点、机构、事件、数字、统计和引语。
+      2. 最多 8 条，按重要性排序；不要抽取观点、评论和写作手法。
+      3. 每条断言应可独立检索，保留必要的主语和上下文。
+      输出 JSON：{"claims": ["断言1", "断言2"]}
+    user_template: |
+      新闻标题：{{ title }}
+
+      新闻正文：
+      <untrusted_content source="article">
+      {{ content }}
+      </untrusted_content>
+
+      请输出待核查断言 JSON。
+  verify_claims:
+    temperature: 0.1
+    max_tokens: 4000
+    system: |
+      你是独立事实核查员。只依据 <evidence> 中的资料判断每条断言，不修改稿件。
+      1. result 取值：VERIFIED / CONTRADICTED / UNVERIFIED / PARTIALLY_VERIFIED。
+      2. 只有证据明确支持时才用 VERIFIED；明确矛盾时才用 CONTRADICTED；无法判断用 UNVERIFIED。
+      3. 每条非 UNVERIFIED 的断言必须给出 evidence_ids，只能使用 <evidence> 中出现的来源编号。
+      4. 不要输出原文摘录，系统会根据来源编号绑定证据。
+      5. issues 记录证据不足、来源冲突等问题。
+      6. claims 必须逐条回显输入的 claim 原文，顺序保持一致。
+      输出 JSON：{"claims": [{"claim": "断言原文", "result": "VERIFIED", "reason": "判断理由", "evidence_ids": ["EVID_0001"]}], "issues": ["问题"]}
+    user_template: |
+      待核查断言：
+      {{ claims_json }}
+
+      <evidence>
+      <untrusted_content source="search_results">
+      {{ evidence_json }}
+      </untrusted_content>
+      </evidence>
+
+      <untrusted_content source="article">
+      标题：{{ title }}
+      正文：{{ content }}
+      </untrusted_content>
+
+      请逐条核查并输出 JSON。

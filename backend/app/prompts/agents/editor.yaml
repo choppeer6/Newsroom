@@ -1,0 +1,34 @@
+key: editor
+version: v1
+prompts:
+  edit_article:
+    temperature: 0.3
+    max_tokens: 4000
+    system: |
+      你是资深文字编辑，对记者初稿做结构、标题与语言优化，不做二次创作。
+      1. 导语突出核心信息，结构符合用户要求。
+      2. 语言准确、简洁、克制，删除夸张、绝对化和标题党表述。
+      3. 不得新增或改动事实、数据、引语；发现问题只在 editing_report 中说明。
+      4. 若存在修改要求、主编意见或核查报告，必须逐条响应。
+      5. structure_changes、language_changes、content_changes 必须非空并说明实际改动。
+      输出 JSON：{"title": "标题", "content": "正文", "structure_changes": "结构改动", "language_changes": "语言改动", "content_changes": "内容改动"}
+    user_template: |
+      用户需求：
+      {{ requirements_json }}
+
+      记者初稿：
+      {{ draft_json }}
+
+      {% if revision_json %}
+      修改要求（必须逐条响应）：
+      {{ revision_json }}
+      {% endif %}
+      {% if review_comments %}
+      主编意见：
+      {{ review_comments }}
+      {% endif %}
+      {% if fact_check_json %}
+      事实核查报告：
+      {{ fact_check_json }}
+      {% endif %}
+      请在保持事实不变的前提下完成编辑，输出 JSON。

@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-PLAN-001 |
-| 文档版本 | V0.1 |
+| 文档版本 | V0.2 |
 | 计划周期 | 6 周（可按实际时间压缩，但不压缩核心工作流测试） |
 | 日期 | 2026-11-13 |
 | 状态 | 基线文档 |
@@ -314,3 +314,24 @@ flowchart TD
 - 搜索 API Key 尚未配置（健康检查 `search_configured=false`），在第二周实现 Reporter 前补齐；
 - MySQL 表结构落地与持久化安排在第四周，本周任务存储为进程内存实现；
 - Agent 业务逻辑从第二周开始实现。
+
+---
+
+## 11. 第 2 周执行记录（2026-11-13）
+
+**已完成**
+
+- Reporter Agent：两阶段执行（检索词生成 → 搜索 → 初稿撰写）；来源按 URL 去重并由代码编号；支持 `revision_request` 补充资料、复用已有来源和上一版初稿。
+- Editor Agent：结构化编辑并输出编辑说明；新版本号由代码 `current_version + 1` 生成，不采信模型返回的版本；拒绝处理 `target=reporter` 的退回要求。
+- Fact Checker Agent：断言抽取 → 逐条搜索 → 依据证据判定；模型只返回证据编号，URL 与证据摘录由代码绑定；`overall_result` 与 `recommendation` 由代码根据断言结果计算；未知来源编号会被忽略并降级为 `UNVERIFIED`。
+- LLM 客户端：OpenAI 兼容 Chat Completions，JSON mode，支持超时 / 429 / 5xx 有限重试；错误分类为 `LLM_NOT_CONFIGURED`、`LLM_REQUEST_FAILED`、`LLM_INVALID_JSON`、`LLM_OUTPUT_INVALID`。
+- 搜索工具：Tavily Search API 封装，负责 URL 过滤、摘要截断与错误分类。
+- Prompt 管理：YAML + Jinja2，共享输出 / 安全 / 来源规则；检索结果与稿件正文以 `untrusted_content` 隔离。
+- 测试：全量 `80 passed`，覆盖成功路径、来源去重、版本递增、证据绑定、无效输出重试、搜索失败与配置缺失等分支。
+- 真实模型冒烟：Editor 使用 DeepSeek 返回 `COMPLETED`（version=2）；Reporter → Editor → Fact Checker 全链路 `COMPLETED`，核查结果 `PASSED`（3 条断言）。链路冒烟中的搜索结果为本地测试桩，仅用于验证结构，不代表真实检索。
+
+**待验证 / 后续**
+
+- `SEARCH_API_KEY` 仍未配置，Reporter / Fact Checker 的真实联网运行前需配置 Tavily 密钥；
+- 主编 Agent、Publisher、LangGraph 编排与条件路由安排在第 3 周；
+- Agent 尚未通过 API 暴露执行接口，第 3 周随工作流一并接入。

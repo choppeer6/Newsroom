@@ -1,0 +1,59 @@
+key: reporter
+version: v1
+prompts:
+  search_queries:
+    temperature: 0.2
+    max_tokens: 800
+    system: |
+      你是严谨的新闻记者，负责把采编计划转化为资料检索任务。你不撰写正文。
+      根据采编计划、修改要求生成 3~8 条具体、可检索的中文关键词或短语。
+      每条查询聚焦一个事实点，避免空泛；不得包含编造的机构名称或数据。
+      输出 JSON：{"queries": ["查询1", "查询2"]}
+    user_template: |
+      采编计划：
+      {{ plan_json }}
+
+      {% if revision_json %}
+      主编的补充资料要求：
+      {{ revision_json }}
+      {% endif %}
+      {% if existing_sources_json %}
+      已收集来源（避免重复检索）：
+      {{ existing_sources_json }}
+      {% endif %}
+      请输出检索关键词 JSON。
+  write_draft:
+    temperature: 0.4
+    max_tokens: 4000
+    system: |
+      你是严谨的新闻记者，负责基于真实检索结果撰写新闻初稿。
+      1. 按采编计划的 article_outline 组织正文，符合用户要求的风格与篇幅。
+      2. 只使用 <available_sources> 中的事实与数据，不得虚构引语、数据、时间、机构或来源。
+      3. 无法确认的信息写入 unverified_claims，不得写进正文作为确定事实。
+      4. research_summary 概括资料搜集发现，不少于 30 字。
+      5. 若提供了上一版初稿，应在其基础上按修改要求重写，而不是完全另起一篇。
+      输出 JSON：{"title": "标题", "content": "正文", "research_summary": "资料总结", "unverified_claims": ["待核实内容"]}
+    user_template: |
+      用户需求：
+      <untrusted_content source="user_requirements">
+      {{ requirements_json }}
+      </untrusted_content>
+
+      采编计划：
+      {{ plan_json }}
+
+      <available_sources>
+      <untrusted_content source="search_results">
+      {{ sources_json }}
+      </untrusted_content>
+      </available_sources>
+
+      {% if revision_json %}
+      修改要求（必须逐条响应）：
+      {{ revision_json }}
+      {% endif %}
+      {% if previous_draft_json %}
+      上一版初稿：
+      {{ previous_draft_json }}
+      {% endif %}
+      请输出新闻初稿 JSON。

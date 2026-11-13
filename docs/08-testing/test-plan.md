@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-TEST-001 |
-| 文档版本 | V0.1 |
+| 文档版本 | V0.2 |
 | 日期 | 2026-11-13 |
-| 状态 | 基线文档 |
+| 状态 | 第 2 周 Agent 单元测试已落地 |
 | 关联文档 | [PRD](../01-requirements/PRD.md)、[工作流设计](../04-workflow/workflow-design.md)、[API 规范](../06-api/api-specification.md) |
 
 ---
@@ -67,12 +67,12 @@
 
 | 用例 | 输入 | 期望 |
 | --- | --- | --- |
-| TC-RP-01 | 正常采编计划 | 调用搜索工具，产出 `draft` 与 `sources`，含 `source_id/title/url/publisher/published_at` |
-| TC-RP-02 | 搜索无结果 | 换关键词重试，输出 `unverified_claims`，不编造来源 |
-| TC-RP-03 | 网页抓取失败 | 跳过并记录，不阻塞整体 |
-| TC-RP-04 | 来源不足 | 标记缺口，供主编决策 |
-| TC-RP-05 | 收到 `revision_request` | 仅补充/重写相关部分，保留原有有效来源 |
-| TC-RP-06 | 输出缺来源 | Pydantic 校验失败或标记 `unverified_claims`，不得静默通过 |
+| TC-RP-01 | 正常采编计划 | 调用搜索工具，产出 `draft` 与 `sources`；来源按 URL 去重，`source_id` 由代码生成 |
+| TC-RP-02 | 搜索无结果 | 返回 `SEARCH_EMPTY` 失败输出，不编造来源；由工作流决定重试或转人工 |
+| TC-RP-03 | 单次搜索失败 | 返回 `SEARCH_FAILED`（可重试），不进入撰写阶段 |
+| TC-RP-04 | 来源不足 | 在 `research_summary` / `unverified_claims` 中标记缺口 |
+| TC-RP-05 | 收到 `revision_request` | 复用已有来源与上一版初稿，按退回要求补充或重写 |
+| TC-RP-06 | 输出缺字段 | Pydantic 校验失败后重试一次；二次失败返回 `LLM_OUTPUT_INVALID` |
 
 ### 4.3 编辑 Agent
 
@@ -92,9 +92,9 @@
 | TC-FC-03 | 引语与来源不符 | `CONTRADICTED`，附证据片段 |
 | TC-FC-04 | 找不到证据 | `UNVERIFIED`，不得判为 `CONTRADICTED` |
 | TC-FC-05 | 部分有据 | `overall_result=PARTIAL` |
-| TC-FC-06 | 仅表达问题 | 报告可建议 `REQUEST_EDIT` |
-| TC-FC-07 | 视角/评论内容 | 不作为事实声明核查 |
-| TC-FC-08 | 证据缺失 | 校验失败重试；持续缺失则明确 `UNVERIFIED` |
+| TC-FC-06 | 仅表达问题 | 仅全部断言 `VERIFIED` 时建议 `APPROVE`，否则建议 `REQUEST_RESEARCH`；最终决策由主编作出 |
+| TC-FC-07 | 视角/评论内容 | Prompt 要求不将观点、评论作为事实声明 |
+| TC-FC-08 | 证据缺失或编号未知 | 忽略未知编号并将断言降级为 `UNVERIFIED`，同时记录 issue |
 
 ### 4.5 审核发布 Agent
 
@@ -220,3 +220,24 @@
 | Critical | 分支错误、版本错配、数据丢失、恢复失败 | 当前迭代必须修复 |
 | Major | 功能不符合预期但有绕行方案 | 当前迭代修复 |
 | Minor | 文案、UI、非关键体验问题 | 可延后 |
+
+---
+
+## 12. 第 2 周测试记录（2026-11-13）
+
+**自动化测试**
+
+- 全量 `80 passed`（第 1 周 42 项 + 第 2 周 38 项）。
+- 新增覆盖：
+  - Reporter：检索词生成、来源去重与编号、补充资料模式、空结果、搜索异常、输出校验重试、非法 JSON 重试；
+  - Editor：版本递增、编辑说明、非法退回目标、输出校验重试、LLM 异常；
+  - Fact Checker：证据绑定、`PASSED` / `PARTIAL` / `FAILED` 汇总、未知证据降级、缺失断言兜底、全量检索失败、空断言重试；
+  - LLM 客户端：JSON 解析、401 不重试、5xx 重试一次、非法响应；
+  - 搜索工具：结果映射、URL 过滤、摘要截断、配置缺失、服务错误；
+  - Prompt：模板加载、共享规则注入、缺失变量报错。
+- 真实模型冒烟：Editor 单独运行 `COMPLETED`；Reporter → Editor → Fact Checker 全链路 `COMPLETED`。链路冒烟使用本地搜索桩，不代表真实检索结果。
+
+**未覆盖**
+
+- 真实 Tavily 检索（`SEARCH_API_KEY` 未配置）；
+- 主编 Agent、Publisher、LangGraph 路由与中断恢复（第 3 周起）。

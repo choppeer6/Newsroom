@@ -1,6 +1,6 @@
 # Backend
 
-FastAPI + LangGraph 后端服务。当前进度：**第 1 周（State、Agent 接口契约、FastAPI 骨架）**。
+FastAPI + LangGraph 后端服务。当前进度：**第 2 周（Reporter / Editor / Fact Checker）**。
 
 ## 当前已实现
 
@@ -9,9 +9,14 @@ FastAPI + LangGraph 后端服务。当前进度：**第 1 周（State、Agent �
 - 模型级不变量：核查报告绑定稿件版本、发布必须用户确认
 - FastAPI 骨架：统一响应、请求 ID、异常处理、CORS
 - 任务创建 / 列表 / 详情 / 取消（内存存储）
-- 40 个单元与接口测试
+- Reporter：检索词生成 → 搜索 → 来源去重编号 → 撰写初稿，支持退回补充资料
+- Editor：结构化编辑，版本号由代码递增，不采信模型返回的版本
+- Fact Checker：断言抽取 → 逐条检索 → 依据证据判定，证据由代码绑定、总体结果由代码计算
+- OpenAI 兼容 LLM JSON 客户端（超时 / 429 / 5xx 有限重试）与 Tavily 搜索工具
+- YAML + Jinja2 Prompt 模板与共享输出 / 安全 / 来源规则
+- 80 个单元与接口测试
 
-未实现：Agent 具体逻辑、LangGraph 编排、MySQL 持久化、JWT 认证（按六周计划推进）。
+未实现：主编 Agent、LangGraph 编排、MySQL 持久化、JWT 认证（按六周计划推进）。
 
 ## 目录结构
 
@@ -19,19 +24,27 @@ FastAPI + LangGraph 后端服务。当前进度：**第 1 周（State、Agent �
 backend/
 ├── app/
 │   ├── main.py              # create_app / 中间件 / 异常处理
-│   ├── core/                # 配置、错误、ID 与时间工具
+│   ├── core/                # 配置、错误、ID 与时间工具、LLM 客户端
 │   ├── schemas/             # 枚举、领域模型、API 模型
 │   ├── graph/
 │   │   └── state.py         # NewsTaskState
 │   ├── agents/
 │   │   ├── base.py          # Agent 抽象基类
-│   │   └── contracts.py     # 五个 Agent 的输入输出契约
+│   │   ├── contracts.py     # 五个 Agent 的输入输出契约
+│   │   ├── runtime.py       # 输出校验重试与统一失败输出
+│   │   ├── sources.py       # 来源归一化、去重与编号
+│   │   ├── reporter.py      # 记者 Agent
+│   │   ├── editor.py        # 编辑 Agent
+│   │   └── fact_checker.py  # 事实核查 Agent
+│   ├── prompts/
+│   │   ├── loader.py        # YAML + Jinja2 加载器
+│   │   ├── agents/          # reporter / editor / fact_checker
+│   │   └── shared/          # 输出、安全、来源规则
 │   ├── services/            # 任务服务与内存存储
 │   ├── api/                 # 路由、依赖、统一响应
 │   ├── models/              # SQLAlchemy ORM（第 4 周）
 │   ├── db/                  # 数据库会话与迁移（第 4 周）
-│   ├── tools/               # 搜索、抓取、发布工具（第 2 周起）
-│   └── prompts/             # Prompt 模板（第 2 周起）
+│   └── tools/               # Tavily 搜索工具
 ├── tests/
 ├── requirements.txt
 ├── requirements-dev.txt
@@ -95,6 +108,38 @@ curl http://127.0.0.1:8000/api/news/health
 ```
 
 密钥只在服务端使用，不会通过接口返回；不要提交 `.env` 或把密钥写入代码。
+
+## 独立运行 Agent
+
+三个 Agent 均返回契约模型，不会返回裸自然语言；失败时通过 `status=FAILED` 与 `error.code` 表达，不抛出到调用方。
+
+```python
+import asyncio
+
+from app.agents.contracts import EditorInput
+from app.agents.editor import EditorAgent
+from app.schemas.domain import ArticleContent
+
+async def main() -> None:
+    agent = EditorAgent()  # 读取 .env 中的 LLM 配置
+    result = await agent.run(
+        EditorInput(
+            task_id="TASK_001",
+            draft=ArticleContent(title="初稿标题", content="初稿正文"),
+            current_version=1,
+        )
+    )
+    if result.status == "FAILED":
+        print(result.error.code, result.error.message)
+    else:
+        print(result.version, result.edited_article.title)
+
+asyncio.run(main())
+```
+
+- Reporter / Fact Checker 需要同时配置 `LLM_API_KEY` 与 `SEARCH_API_KEY`，Editor 只需要 LLM。
+- Reporter 支持传入 `revision_request`、`existing_sources` 和 `previous_draft` 完成退回重写。
+- Fact Checker 的核查报告会自动绑定 `article_id` 与 `article_version`。
 
 ## 测试
 

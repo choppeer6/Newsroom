@@ -2,7 +2,7 @@
 
 **AI Newsroom 智能新闻编辑部**：基于大语言模型和多智能体协作技术的智能新闻采编系统，实现新闻选题分析、资料搜集、新闻撰写、稿件编辑、事实核查和审核发布的半自动化流程。
 
-> 当前阶段：**第 1 周已完成**。已落地 `NewsTaskState`、五个 Agent 的接口契约、FastAPI 骨架和任务基础接口；Agent 逻辑与 LangGraph 编排将在第 2、3 周接入。
+> 当前阶段：**第 2 周已完成**。已落地 `NewsTaskState`、Agent 接口契约、FastAPI 骨架，以及 Reporter、Editor、Fact Checker 三个 Agent 的结构化逻辑；主编 Agent 与 LangGraph 编排将在第 3 周接入。
 
 ## 项目基线
 
@@ -53,7 +53,7 @@ Newsroom/
 │   ├── 07-prompts/             # Prompt 与工具设计
 │   ├── 08-testing/             # 测试计划与验收
 │   └── 09-development-plan/    # 开发实施计划与迭代路线
-├── backend/                    # FastAPI 后端（State / 契约 / 任务接口已实现）
+├── backend/                    # FastAPI 后端（State / 契约 / 任务接口 / 三个 Agent 已实现）
 ├── frontend/                   # 前端应用（待实现）
 └── README.md
 ```
@@ -64,7 +64,7 @@ Newsroom/
 | --- | --- | --- | --- |
 | 01 | 产品需求规格说明书（PRD） | [docs/01-requirements/PRD.md](docs/01-requirements/PRD.md) | V0.1 |
 | 02 | 系统总体架构设计（HLD） | [docs/02-architecture/system-architecture.md](docs/02-architecture/system-architecture.md) | V0.1 |
-| 03 | Agent 设计说明书（统一规范） | [docs/03-agent-design/agent-specification.md](docs/03-agent-design/agent-specification.md) | V0.2 |
+| 03 | Agent 设计说明书（统一规范） | [docs/03-agent-design/agent-specification.md](docs/03-agent-design/agent-specification.md) | V0.3 |
 | 03 | 主编 Agent 详细设计 | [docs/03-agent-design/chief-editor-agent.md](docs/03-agent-design/chief-editor-agent.md) | 细化 |
 | 03 | 记者 Agent 详细设计 | [docs/03-agent-design/reporter-agent.md](docs/03-agent-design/reporter-agent.md) | 细化 |
 | 03 | 编辑 Agent 详细设计 | [docs/03-agent-design/editor-agent.md](docs/03-agent-design/editor-agent.md) | 细化 |
@@ -74,9 +74,9 @@ Newsroom/
 | 05 | 数据库设计文档 | [docs/05-data-design/database-design.md](docs/05-data-design/database-design.md) | V0.1 |
 | 05 | 状态设计文档（NewsTaskState） | [docs/05-data-design/state-schema.md](docs/05-data-design/state-schema.md) | V0.2 |
 | 06 | API 接口设计文档 | [docs/06-api/api-specification.md](docs/06-api/api-specification.md) | V0.2 |
-| 07 | Prompt 与工具设计文档 | [docs/07-prompts/prompt-design.md](docs/07-prompts/prompt-design.md) | 初稿 |
-| 08 | 测试计划与验收文档 | [docs/08-testing/test-plan.md](docs/08-testing/test-plan.md) | 初稿 |
-| 09 | 开发实施计划（六周迭代） | [docs/09-development-plan/development-plan.md](docs/09-development-plan/development-plan.md) | V0.1 |
+| 07 | Prompt 与工具设计文档 | [docs/07-prompts/prompt-design.md](docs/07-prompts/prompt-design.md) | V0.2 |
+| 08 | 测试计划与验收文档 | [docs/08-testing/test-plan.md](docs/08-testing/test-plan.md) | V0.2 |
+| 09 | 开发实施计划（六周迭代） | [docs/09-development-plan/development-plan.md](docs/09-development-plan/development-plan.md) | V0.2 |
 
 ## 开发路线
 
@@ -85,7 +85,7 @@ Newsroom/
 | 周次 | 开发重点 | 阶段成果 |
 | --- | --- | --- |
 | 第 1 周（已完成） | 基础设施、State 与接口契约 | 项目可启动，模型可调用，任务 State 可生成 |
-| 第 2 周 | 记者 / 编辑 / 事实核查 Agent | 三个 Agent 可独立运行并有结构化输出 |
+| 第 2 周（已完成） | 记者 / 编辑 / 事实核查 Agent | 三个 Agent 可独立运行并有结构化输出 |
 | 第 3 周 | 主编 Agent 与 LangGraph 编排 | 核心新闻生产工作流（含条件路由与循环） |
 | 第 4 周 | 数据持久化与任务管理 | 任务、版本、核查报告可保存、查询和恢复 |
 | 第 5 周 | 前端与发布机制 | 前后端联调，用户确认后发布 |

@@ -59,6 +59,7 @@ class ChiefPlanningOutput(AgentOutput):
 
 class ReporterInput(AgentInput):
     editorial_plan: EditorialPlan
+    requirements: TaskRequirements = Field(default_factory=TaskRequirements)
     revision_request: RevisionRequest | None = None
     existing_sources: list[ResearchSource] = Field(default_factory=list)
     previous_draft: ArticleContent | None = None

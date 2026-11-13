@@ -3,9 +3,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-AGENT-001 |
-| 版本 | V0.2 |
+| 版本 | V0.3 |
 | 日期 | 2026-11-13 |
-| 状态 | 接口契约已实现（第 1 周） |
+| 状态 | 接口契约与三个 Agent 已实现（第 2 周） |
 | 项目 | AI Newsroom 智能新闻编辑部 |
 | 关联文档 | [PRD](../01-requirements/PRD.md)、[系统架构](../02-architecture/system-architecture.md)、[工作流设计](../04-workflow/workflow-design.md)、[状态设计](../05-data-design/state-schema.md) |
 
@@ -479,7 +479,7 @@ flowchart TD
 | 工作流节点 | 输入模型 | 输出模型 | 关键约束 |
 | --- | --- | --- | --- |
 | `chief_planning` | `ChiefPlanningInput` | `ChiefPlanningOutput` | 成功时必须输出 `editorial_plan`，下一节点固定为 `reporter` |
-| `reporter` | `ReporterInput` | `ReporterOutput` | 成功时必须包含初稿、至少一条来源和资料总结；来源 URL 必须是 HTTP(S) |
+| `reporter` | `ReporterInput` | `ReporterOutput` | 成功时必须包含初稿、至少一条来源和资料总结；来源 URL 必须是 HTTP(S)；输入含用户需求、已有来源与上一版初稿，用于补充资料时复用 |
 | `editor` | `EditorInput` | `EditorOutput` | 成功时必须包含编辑稿、编辑说明和新版本号；版本号 ≥ 2 |
 | `fact_checker` | `FactCheckerInput` | `FactCheckerOutput` | 输入必须带 `article_id` 和 `article_version`；成功输出必须回显两者，用于绑定核查报告 |
 | `chief_review` | `ChiefReviewInput` | `ChiefReviewOutput` | `REQUEST_EDIT` 必须携带 `target=editor` 的修改要求；`REQUEST_RESEARCH` 必须携带 `target=reporter` 的补充资料要求；`APPROVE` 不得携带修改要求 |
@@ -497,6 +497,27 @@ flowchart TD
 
 ### 10.4 实现状态
 
-- 第 1 周：完成输入输出契约、枚举、领域模型和契约测试；
-- 第 2 周：实现 Reporter、Editor、Fact Checker、Chief Editor、Publisher 的具体逻辑与 Prompt；
-- 第 3 周：将节点接入 LangGraph，并由工作流负责状态更新、路由和错误重试。
+- 第 1 周：完成输入输出契约、枚举、领域模型和契约测试（已完成）；
+- 第 2 周：完成 Reporter、Editor、Fact Checker 的具体逻辑、Prompt 与测试（已完成）；
+- 第 3 周：实现 Chief Editor、Publisher，并将节点接入 LangGraph，由工作流负责状态更新、路由和错误重试。
+
+### 10.5 第 2 周实现要点（V0.3）
+
+| 模块 | 位置 | 说明 |
+| --- | --- | --- |
+| Reporter | `backend/app/agents/reporter.py` | 生成检索词 → 并行搜索 → 来源去重编号 → 撰写初稿；支持补充资料 |
+| Editor | `backend/app/agents/editor.py` | 结构化编辑；新版本号由代码递增；拒绝非编辑类退回 |
+| Fact Checker | `backend/app/agents/fact_checker.py` | 抽取断言 → 逐条搜索 → 依据证据判定 |
+| 来源处理 | `backend/app/agents/sources.py` | URL 归一化、去重、`SRC` / `EVID` 编号 |
+| LLM 客户端 | `backend/app/core/llm.py` | OpenAI 兼容 JSON mode，错误分类与有限重试 |
+| 搜索工具 | `backend/app/tools/search.py` | Tavily 搜索，过滤非 HTTP(S) URL，截断摘要 |
+| Prompt | `backend/app/prompts/` | YAML + Jinja2，`agents/` 与共享规则 `shared/` |
+
+新增的确定性约束：
+
+1. **来源只来自工具**：Reporter 不接受模型返回的 URL，来源只能来自搜索工具与已有来源；同一 URL 去重后由代码编号。
+2. **版本由代码控制**：Editor 输出的 `version = current_version + 1`，模型无权决定版本号。
+3. **证据由代码绑定**：Fact Checker 只接受模型返回的证据编号；URL 与摘录从证据池读取，未知编号会被忽略，缺少有效证据的断言降级为 `UNVERIFIED`。
+4. **核查结论由代码汇总**：存在 `CONTRADICTED` 时为 `FAILED`，全部 `VERIFIED` 时为 `PASSED`，其余为 `PARTIAL`；建议仅在全部通过时为 `APPROVE`。
+5. **失败不抛出**：三个 Agent 均以契约输出返回 `status=FAILED` 与结构化 `error`，由工作流决定重试或转人工。
+6. **Prompt 不硬编码**：Prompt 位于 YAML 文件，模型输出先经 Pydantic 校验，失败自动携带校验错误重试一次。
