@@ -1,20 +1,24 @@
 import logging
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.response import get_request_id
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.services.demo_service import DemoService
 from app.services.task_service import TaskService
 from app.services.task_store import InMemoryTaskStore
 
 logger = logging.getLogger(__name__)
+
+WEB_DIR = Path(__file__).resolve().parent / "web"
 
 
 def _new_request_id(raw: str | None) -> str:
@@ -51,6 +55,7 @@ def create_app() -> FastAPI:
 
     app.state.settings = settings
     app.state.task_service = TaskService(InMemoryTaskStore())
+    app.state.demo_service = DemoService()
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -123,6 +128,11 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    @app.get("/demo", include_in_schema=False)
+    async def demo_console() -> FileResponse:
+        return FileResponse(WEB_DIR / "demo.html")
+
     return app
 
 
