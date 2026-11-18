@@ -136,6 +136,7 @@ class FactCheckerOutput(AgentOutput):
 class ChiefReviewInput(AgentInput):
     topic: str = Field(min_length=1, max_length=500)
     description: str = Field(default="", max_length=5000)
+    requirements: TaskRequirements = Field(default_factory=TaskRequirements)
     editorial_plan: EditorialPlan
     sources: list[ResearchSource] = Field(default_factory=list)
     edited_article: ArticleContent

@@ -1,6 +1,6 @@
 # Backend
 
-FastAPI + LangGraph 后端服务。当前进度：**第 2 周（Reporter / Editor / Fact Checker）**。
+FastAPI + LangGraph 后端服务。当前进度：**第 3 周（主编 / 发布 / 工作流编排）**。
 
 ## 当前已实现
 
@@ -12,12 +12,16 @@ FastAPI + LangGraph 后端服务。当前进度：**第 2 周（Reporter / Edito
 - Reporter：检索词生成 → 搜索 → 来源去重编号 → 撰写初稿，支持退回补充资料
 - Editor：结构化编辑，版本号由代码递增，不采信模型返回的版本
 - Fact Checker：断言抽取 → 逐条检索 → 依据证据判定，证据由代码绑定、总体结果由代码计算
+- Chief Editor：规划节点输出采编计划；审核节点输出四种决策，`APPROVE` 仅在核查通过时保留
+- Publisher：校验审核与核查前置条件，未确认只创建待发布记录；确认后调用幂等模拟发布通道
+- LangGraph 工作流：条件路由、退回循环、人工审核中断、发布确认、执行日志、内存检查点
+- 临时联调页面 `/demo`：发起任务、进度轮询、人工审核、发布确认（正式前端仍按计划推进）
 - OpenAI 兼容 LLM JSON 客户端（超时 / 429 / 5xx 有限重试）与 Tavily 搜索工具
 - YAML + Jinja2 Prompt 模板与共享输出 / 安全 / 来源规则
-- 80 个单元与接口测试
-- 真实 DeepSeek + Tavily 全链路验证：Reporter → Editor → Fact Checker 均 `COMPLETED`，核查报告绑定版本 2
+- 130 个单元、集成与工作流测试
+- 真实 DeepSeek + Tavily 全流程验证：规划 → 记者 → 编辑 → 核查 → 主编 → 待发布 → 确认发布
 
-未实现：主编 Agent、LangGraph 编排、MySQL 持久化、JWT 认证（按六周计划推进）。
+未实现：MySQL 持久化、工作流执行接口、正式前端、JWT 认证（按六周计划推进）。
 
 ## 目录结构
 
@@ -28,7 +32,10 @@ backend/
 │   ├── core/                # 配置、错误、ID 与时间工具、LLM 客户端
 │   ├── schemas/             # 枚举、领域模型、API 模型
 │   ├── graph/
-│   │   └── state.py         # NewsTaskState
+│   │   ├── state.py         # NewsTaskState
+│   │   ├── routing.py       # 条件路由
+│   │   ├── nodes.py         # 九个工作流节点与 Agent 装配
+│   │   └── workflow.py      # 图组装、检查点与运行封装
 │   ├── agents/
 │   │   ├── base.py          # Agent 抽象基类
 │   │   ├── contracts.py     # 五个 Agent 的输入输出契约
@@ -36,13 +43,16 @@ backend/
 │   │   ├── sources.py       # 来源归一化、去重与编号
 │   │   ├── reporter.py      # 记者 Agent
 │   │   ├── editor.py        # 编辑 Agent
-│   │   └── fact_checker.py  # 事实核查 Agent
+│   │   ├── fact_checker.py  # 事实核查 Agent
+│   │   ├── chief_editor.py  # 主编规划 / 审核 Agent
+│   │   └── publisher.py     # 发布 Agent
 │   ├── prompts/
 │   │   ├── loader.py        # YAML + Jinja2 加载器
-│   │   ├── agents/          # reporter / editor / fact_checker
+│   │   ├── agents/          # 五个 Agent 的 Prompt
 │   │   └── shared/          # 输出、安全、来源规则
-│   ├── services/            # 任务服务与内存存储
+│   ├── services/            # 任务服务、内存存储、模拟发布通道、联调运行器
 │   ├── api/                 # 路由、依赖、统一响应
+│   ├── web/                 # 临时联调页面
 │   ├── models/              # SQLAlchemy ORM（第 4 周）
 │   ├── db/                  # 数据库会话与迁移（第 4 周）
 │   └── tools/               # Tavily 搜索工具
@@ -66,6 +76,18 @@ uvicorn app.main:app --reload
 ```
 
 打开 http://127.0.0.1:8000/docs 查看接口文档。
+
+## 工作流联调页面（临时）
+
+启动服务后打开 http://127.0.0.1:8000/demo 。
+
+- 页面发起选题，轮询展示选题规划、稿件、事实核查、来源与执行日志；
+- 人工审核节点可选择通过 / 退回编辑 / 退回记者 / 终止；
+- 待发布节点可选择确认发布或暂缓发布；
+- 任务保存在进程内存中，刷新页面会自动接回当前任务，重启服务后清空；
+- 页面直接调用真实 LLM 与搜索接口，一次完整流程通常 1–3 分钟。
+
+该页面只用于联调核心工作流，正式前端与工作流执行 API 按六周计划在第 4–6 周实现。
 
 ## LLM 与搜索配置
 
@@ -110,9 +132,37 @@ curl http://127.0.0.1:8000/api/news/health
 
 密钥只在服务端使用，不会通过接口返回；不要提交 `.env` 或把密钥写入代码。
 
+## 运行工作流
+
+```python
+import asyncio
+
+from app.graph.state import NewsTaskState
+from app.graph.workflow import NewsroomWorkflow
+
+
+async def main() -> None:
+    workflow = NewsroomWorkflow()  # 读取 .env 中的 LLM 与搜索配置
+    result = await workflow.run(
+        NewsTaskState(task_id="TASK_001", topic="人工智能在高校教育中的应用")
+    )
+    # 停在人工审核或发布确认时 result.interrupt 非空
+    print(result.state.task_status, result.interrupt)
+
+    # 发布确认：{"confirm": True} 或 {"confirm": False}
+    final = await workflow.resume("TASK_001", {"confirm": True})
+    print(final.state.task_status)
+
+
+asyncio.run(main())
+```
+
+- 人工审核恢复值为 `{"decision": "APPROVE|REQUEST_EDIT|REQUEST_RESEARCH|TERMINATE", ...}`。
+- 检查点为内存实现，进程重启后清空；第 4 周替换为持久化 Checkpointer。
+
 ## 独立运行 Agent
 
-三个 Agent 均返回契约模型，不会返回裸自然语言；失败时通过 `status=FAILED` 与 `error.code` 表达，不抛出到调用方。
+各 Agent 均返回契约模型，不会返回裸自然语言；失败时通过 `status=FAILED` 与 `error.code` 表达，不抛出到调用方。
 
 ```python
 import asyncio

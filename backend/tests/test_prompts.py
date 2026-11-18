@@ -4,6 +4,23 @@ from jinja2 import UndefinedError
 from app.prompts.loader import load_prompt
 
 PROMPT_CONTEXTS = {
+    ("chief_editor", "planning"): {
+        "topic": "选题",
+        "description": "",
+        "requirements_json": "{}",
+    },
+    ("chief_editor", "review"): {
+        "topic": "选题",
+        "description": "",
+        "requirements_json": "{}",
+        "plan_json": "{}",
+        "article_json": "{}",
+        "article_version": 2,
+        "sources_json": "[]",
+        "fact_check_json": "{}",
+        "retry_count": 0,
+        "max_retry": 2,
+    },
     ("reporter", "search_queries"): {
         "plan_json": "{}",
         "revision_json": "",

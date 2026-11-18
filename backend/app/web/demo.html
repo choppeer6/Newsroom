@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Newsroom · 工作流联调台</title>
+<style>
+  :root {
+    --paper: #f4f1ea;
+    --ink: #1c1a17;
+    --muted: #6d675d;
+    --line: #e2dcd0;
+    --card: #fffdf8;
+    --accent: #b3261e;
+    --green: #2f6f4f;
+    --amber: #a8701a;
+    --blue: #2c5f8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 14px/1.6 "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1, h2, h3 { font-family: "Noto Serif SC", Georgia, "Songti SC", serif; margin: 0; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 18px 28px; border-bottom: 1px solid var(--line); background: var(--card);
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .mark {
+    width: 40px; height: 40px; border-radius: 8px; background: var(--ink); color: #fff;
+    display: grid; place-items: center; font-weight: 700; letter-spacing: .5px;
+  }
+  .brand h1 { font-size: 19px; letter-spacing: .5px; }
+  .brand p { margin: 0; color: var(--muted); font-size: 12px; }
+  .env { display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+    font-size: 12px; color: var(--muted); background: #fff;
+  }
+  .badge.ok { color: var(--green); border-color: #cfe3d8; background: #f0f7f3; }
+  .badge.bad { color: var(--accent); border-color: #efd2cf; background: #fdf1f0; }
+  .layout {
+    display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 22px;
+    padding: 22px 28px 48px; align-items: start;
+  }
+  @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+  .composer {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px;
+  }
+  @media (min-width: 981px) { .composer { position: sticky; top: 18px; } }
+  .composer h2 { font-size: 16px; margin-bottom: 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  input, textarea, select {
+    width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid var(--line);
+    border-radius: 8px; background: #fff; color: var(--ink);
+    font: inherit; font-size: 13px;
+  }
+  textarea { resize: vertical; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid #e8d9b8; border-color: #cbb98f; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .btn {
+    border: 1px solid var(--ink); background: var(--ink); color: #fff;
+    border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .btn:hover { opacity: .85; }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; }
+  .btn.ghost { background: #fff; color: var(--ink); }
+  .btn.danger { background: var(--accent); border-color: var(--accent); }
+  .btn.success { background: var(--green); border-color: var(--green); }
+  .btn.block { width: 100%; margin-top: 4px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+  .statusbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .pill {
+    border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 600;
+    background: #ece7dc; color: var(--muted); border: 1px solid var(--line);
+  }
+  .pill.running { background: #eef3fa; color: var(--blue); border-color: #cfddec; }
+  .pill.review { background: #fdf3e3; color: var(--amber); border-color: #eddcc0; }
+  .pill.done { background: #f0f7f3; color: var(--green); border-color: #cfe3d8; }
+  .pill.fail { background: #fdf1f0; color: var(--accent); border-color: #efd2cf; }
+  .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; color: var(--muted); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .pipeline {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 1px; list-style: none; margin: 0 0 18px; padding: 0;
+    border: 1px solid var(--line); border-radius: 12px;
+    background: var(--line); overflow: hidden;
+  }
+  @media (min-width: 1280px) { .pipeline { grid-template-columns: repeat(10, 1fr); } }
+  .pipeline li {
+    background: var(--card); padding: 10px 12px; font-size: 12px; color: var(--muted);
+    position: relative; white-space: nowrap;
+  }
+  .pipeline li .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #d8d1c3; margin-right: 6px;
+  }
+  .pipeline li.done { color: var(--ink); }
+  .pipeline li.done .dot { background: var(--green); }
+  .pipeline li.active { background: #fbf4e6; color: var(--ink); font-weight: 600; }
+  .pipeline li.active .dot { background: var(--amber); box-shadow: 0 0 0 3px #f3e4c6; }
+  .pipeline li.failed { background: #fdf1f0; color: var(--accent); }
+  .pipeline li.failed .dot { background: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 1180px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; min-width: 0;
+  }
+  .card h3 { font-size: 14px; margin-bottom: 10px; display: flex; justify-content: space-between; gap: 8px; }
+  .card h3 .meta { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
+  .span2 { grid-column: span 2; }
+  @media (max-width: 1180px) { .span2 { grid-column: auto; } }
+  .attention:empty { display: none; }
+  .attention { margin-bottom: 18px; }
+  .callout {
+    background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--amber);
+    border-radius: 12px; padding: 16px 18px;
+  }
+  .callout.confirm { border-left-color: var(--blue); }
+  .callout.fail { border-left-color: var(--accent); }
+  .callout.done { border-left-color: var(--green); }
+  .callout h3 { font-size: 15px; margin-bottom: 6px; }
+  .lead { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .decision-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  @media (max-width: 720px) { .decision-grid { grid-template-columns: 1fr; } }
+  .decision-grid label.opt {
+    display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 9px 11px;
+    border: 1px solid var(--line); border-radius: 8px; background: #fff; cursor: pointer;
+    color: var(--ink); font-size: 13px;
+  }
+  .decision-grid label.opt small { display: block; color: var(--muted); font-size: 11px; }
+  .decision-grid input[type="radio"] { width: auto; margin: 3px 0 0; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .article-title { font-family: "Noto Serif SC", Georgia, serif; font-size: 18px; margin: 4px 0 10px; }
+  .prose { white-space: pre-wrap; font-size: 13.5px; line-height: 1.85; max-height: 420px; overflow: auto; }
+  .kv { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px 10px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; word-break: break-word; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+  .chips li { background: #f1ece1; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+  .section { margin-top: 12px; }
+  .section h4 { margin: 0 0 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  ul.plain { margin: 0; padding-left: 18px; font-size: 13px; }
+  ul.plain li { margin: 2px 0; }
+  .claims { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .claims li { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fff; }
+  .claims .top { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  .claims p { margin: 0; color: var(--muted); font-size: 12px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+  .tag.VERIFIED { background: #eaf5ee; color: var(--green); }
+  .tag.CONTRADICTED { background: #fdeceb; color: var(--accent); }
+  .tag.UNVERIFIED { background: #f4efe4; color: var(--amber); }
+  .tag.PARTIALLY_VERIFIED { background: #eef3fa; color: var(--blue); }
+  .tag.PASSED { background: #eaf5ee; color: var(--green); }
+  .tag.PARTIAL { background: #f4efe4; color: var(--amber); }
+  .tag.FAILED { background: #fdeceb; color: var(--accent); }
+  .sources { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+  .sources li { font-size: 13px; display: flex; gap: 8px; }
+  .sources .idx { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; padding-top: 2px; }
+  .sources a { color: var(--ink); text-decoration: none; border-bottom: 1px dotted #b9b0a0; }
+  .sources a:hover { color: var(--accent); }
+  .sources .pub { color: var(--muted); font-size: 11px; }
+  table.logs { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.logs th { text-align: left; color: var(--muted); font-weight: 600; padding: 4px 8px 6px 0; border-bottom: 1px solid var(--line); }
+  table.logs td { padding: 5px 8px 5px 0; border-bottom: 1px dashed #eee7da; vertical-align: top; }
+  table.logs tr:last-child td { border-bottom: 0; }
+  .st-COMPLETED { color: var(--green); }
+  .st-FAILED { color: var(--accent); }
+  .st-RUNNING { color: var(--blue); }
+  .empty { color: var(--muted); font-size: 12px; }
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: #2a2620; color: #fff; padding: 10px 16px; border-radius: 8px;
+    font-size: 13px; max-width: min(90vw, 620px); box-shadow: 0 8px 24px rgba(0,0,0,.18);
+    opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20;
+  }
+  #toast.show { opacity: 1; }
+  code { background: #f1ece1; border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">AI</span>
+    <div>
+      <h1>AI Newsroom</h1>
+      <p>多智能体采编工作流 · 联调台（临时演示页，正式前端见第 6 周）</p>
+    </div>
+  </div>
+  <div class="env" id="env"><span class="badge">加载配置中…</span></div>
+</header>
+
+<main class="layout">
+  <aside class="composer">
+    <h2>发起采编任务</h2>
+    <form id="start-form">
+      <label>选题<input id="topic" required maxlength="500" value="人工智能在高校教育中的应用"></label>
+      <label>补充说明<textarea id="description" rows="3" maxlength="5000" placeholder="报道背景、侧重点、已知线索…"></textarea></label>
+      <div class="row">
+        <label>写作风格<input id="style" maxlength="100" value="客观新闻报道"></label>
+        <label>目标字数<input id="target-length" type="number" min="200" max="5000" value="1200"></label>
+      </div>
+      <label>关注角度（逗号分隔）<input id="focus" value="应用案例, 教学效果, 风险与治理"></label>
+      <button class="btn block" id="start-btn" type="submit">开始采编</button>
+      <p class="hint">真实调用 DeepSeek 与 Tavily，完整流程通常 1–3 分钟。页面会自动轮询进度。</p>
+    </form>
+  </aside>
+
+  <section class="board">
+    <div class="statusbar">
+      <span class="pill" id="phase-pill">待开始</span>
+      <span class="mono" id="task-id">—</span>
+      <span class="muted" id="retry-info"></span>
+    </div>
+
+    <ol class="pipeline" id="pipeline"></ol>
+
+    <div class="attention" id="attention"></div>
+
+    <div class="grid">
+      <article class="card span2" id="article-card">
+        <h3>稿件<span class="meta" id="article-meta"></span></h3>
+        <div class="empty">尚未生成稿件</div>
+      </article>
+      <article class="card" id="plan-card">
+        <h3>选题规划</h3>
+        <div class="empty">尚未生成规划</div>
+      </article>
+      <article class="card" id="fact-card">
+        <h3>事实核查</h3>
+        <div class="empty">尚未核查</div>
+      </article>
+      <article class="card" id="sources-card">
+        <h3>信息来源<span class="meta"></span></h3>
+        <div class="empty">尚未检索</div>
+      </article>
+      <article class="card" id="logs-card">
+        <h3>执行日志</h3>
+        <div class="empty">暂无日志</div>
+      </article>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const API = "/api/news/demo";
+const STAGES = [
+  ["created", "立项"],
+  ["chief_planning", "选题规划"],
+  ["research", "检索"],
+  ["writing", "写作"],
+  ["editing", "编辑"],
+  ["fact_check", "核查"],
+  ["chief_review", "主编审核"],
+  ["human_approval", "人工审核"],
+  ["pending_publish", "待发布"],
+  ["published", "已发布"]
+];
+const PHASE_TEXT = {
+  running: "运行中",
+  human_review: "等待人工审核",
+  publish_confirmation: "等待发布确认",
+  finished: "流程结束",
+  failed: "执行失败"
+};
+const PHASE_CLASS = {
+  running: "running",
+  human_review: "review",
+  publish_confirmation: "review",
+  finished: "done",
+  failed: "fail"
+};
+const DECISION_OPTIONS = [
+  ["APPROVE", "通过", "进入发布确认环节"],
+  ["REQUEST_EDIT", "退回编辑", "调整结构或表达后重新核查"],
+  ["REQUEST_RESEARCH", "退回记者", "补充资料后重写并重新核查"],
+  ["TERMINATE", "终止任务", "结束本次采编流程"]
+];
+
+let taskId = null;
+let timer = null;
+let attentionKey = null;
+let submitting = false;
+
+const STORAGE_KEY = "newsroom.demo.task";
+
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+})[ch]);
+const clock = (iso) => iso ? new Date(iso).toLocaleTimeString("zh-CN", { hour12: false }) : "";
+
+function toast(message) {
+  const el = $("toast");
+  el.textContent = message;
+  el.classList.add("show");
+  clearTimeout(el._hide);
+  el._hide = setTimeout(() => el.classList.remove("show"), 3600);
+}
+
+async function call(path, options = {}) {
+  const res = await fetch(API + path, {
+    headers: { "Content-Type": "application/json" },
+    ...options
+  });
+  let body = null;
+  try { body = await res.json(); } catch (_) { /* ignore */ }
+  if (!res.ok || (body && body.code !== 0)) {
+    throw new Error((body && (body.message || "请求失败")) || `HTTP ${res.status}`);
+  }
+  return body ? body.data : null;
+}
+
+function renderPipeline(snap) {
+  const stage = snap ? snap.current_stage : null;
+  const failed = Boolean(snap && (snap.phase === "failed" || stage === "error"));
+  let current = STAGES.findIndex(([key]) => key === stage);
+  if (stage === "revision_required") current = STAGES.findIndex(([key]) => key === "editing");
+  if (stage === "error" && snap.logs && snap.logs.length) {
+    const agentMap = {
+      chief_editor: "chief_planning",
+      reporter: "writing",
+      editor: "editing",
+      fact_checker: "fact_check",
+      publisher: "pending_publish"
+    };
+    const last = snap.logs[snap.logs.length - 1];
+    const mapped = agentMap[last.agent];
+    if (mapped) current = STAGES.findIndex(([key]) => key === mapped);
+  }
+  $("pipeline").innerHTML = STAGES.map(([key, label], index) => {
+    let cls = "";
+    if (current === index) cls = failed ? "failed" : "active";
+    else if (current > index) cls = "done";
+    else if (snap && snap.task_status === "PUBLISHED" && key === "published") cls = "done";
+    return `<li class="${cls}"><span class="dot"></span>${label}</li>`;
+  }).join("");
+}
+
+function renderStatus(snap) {
+  const pill = $("phase-pill");
+  pill.className = "pill " + (PHASE_CLASS[snap.phase] || "");
+  pill.textContent = PHASE_TEXT[snap.phase] + (snap.phase === "finished" ? ` · ${snap.task_status}` : "");
+  $("task-id").textContent = snap.task_id;
+  $("retry-info").textContent = `退回次数 ${snap.retry_count} / ${snap.max_retry}`;
+}
+
+function reviewCard(snap) {
+  const chief = snap.chief || {};
+  const fact = snap.fact_check || {};
+  const options = DECISION_OPTIONS.map(([value, label, desc]) => `
+    <label class="opt">
+      <input type="radio" name="decision" value="${value}" ${value === "APPROVE" ? "" : ""}>
+      <span>${label}<small>${desc}</small></span>
+    </label>`).join("");
+  return `
+    <div class="callout">
+      <h3>等待人工审核</h3>
+      <p class="lead">主编判定 <code>${esc(chief.decision || "—")}</code>，核查结论
+        <code>${esc(fact.overall_result || "—")}</code>。请给出处理意见后继续流程。</p>
+      <dl class="kv">
+        <dt>稿件</dt><dd>${esc(snap.article ? snap.article.title : "—")} · v${esc(snap.article ? snap.article.version : "—")}</dd>
+        <dt>主编意见</dt><dd>${esc(chief.comments || "—")}</dd>
+      </dl>
+      <form id="review-form">
+        <div class="section"><h4>处理意见</h4><div class="decision-grid">${options}</div></div>
+        <label>审核备注（可选）<textarea id="review-comments" rows="2" maxlength="2000" placeholder="补充说明会写入审核意见"></textarea></label>
+        <div id="revision-fields" style="display:none">
+          <label>修改原因<textarea id="revision-reason" rows="2" maxlength="1000" placeholder="例如：关键数据缺少来源"></textarea></label>
+          <label>修改要求（每行一条）<textarea id="revision-requirements" rows="3" placeholder="补充统计数据来源&#10;合并重复段落"></textarea></label>
+        </div>
+        <div class="actions"><button class="btn" id="review-btn" type="submit">提交审核结论</button></div>
+      </form>
+    </div>`;
+}
+
+function confirmCard(snap) {
+  const pub = snap.publication || {};
+  return `
+    <div class="callout confirm">
+      <h3>等待发布确认</h3>
+      <p class="lead">${esc(pub.message || "稿件已进入待发布状态")}</p>
+      <dl class="kv">
+        <dt>稿件</dt><dd>${esc(snap.article ? snap.article.title : "—")}</dd>
+        <dt>编号</dt><dd><code>${esc(snap.article ? snap.article.article_id : "—")}</code></dd>
+        <dt>版本</dt><dd>v${esc(snap.article ? snap.article.version : "—")}</dd>
+        <dt>状态</dt><dd>${esc(pub.status || "—")}</dd>
+      </dl>
+      <div class="actions">
+        <button class="btn success" id="confirm-yes" type="button">确认发布</button>
+        <button class="btn ghost" id="confirm-no" type="button">暂不发布</button>
+      </div>
+    </div>`;
+}
+
+function outcomeCard(snap) {
+  if (snap.phase === "failed") {
+    const err = snap.error || {};
+    return `
+      <div class="callout fail">
+        <h3>流程执行失败</h3>
+        <p class="lead"><code>${esc(err.code || "UNKNOWN")}</code> · ${esc(err.message || "未知错误")}</p>
+      </div>`;
+  }
+  if (snap.task_status === "CANCELLED") {
+    return `<div class="callout fail"><h3>任务已终止</h3><p class="lead">本次采编流程已取消。</p></div>`;
+  }
+  if (snap.task_status === "PUBLISHED") {
+    const url = (snap.publication || {}).external_url;
+    return `
+      <div class="callout done">
+        <h3>发布完成</h3>
+        <p class="lead">稿件 v${esc(snap.article ? snap.article.version : "—")} 已发布${url ? `：<a href="${esc(url)}" target="_blank" rel="noreferrer">${esc(url)}</a>` : "。"}</p>
+      </div>`;
+  }
+  if (snap.task_status === "PENDING_PUBLISH") {
+    return `<div class="callout confirm"><h3>已暂缓发布</h3><p class="lead">稿件保留在待发布状态，本次流程结束。</p></div>`;
+  }
+  return "";
+}
+
+function renderAttention(snap) {
+  const key = [snap.phase, snap.task_status, snap.retry_count, snap.article && snap.article.version].join(":");
+  if (key === attentionKey) return;
+  attentionKey = key;
+  const box = $("attention");
+  if (snap.phase === "human_review") {
+    box.innerHTML = reviewCard(snap);
+    const form = $("review-form");
+    const fields = $("revision-fields");
+    form.addEventListener("change", (event) => {
+      if (event.target.name !== "decision") return;
+      const needsRevision = ["REQUEST_EDIT", "REQUEST_RESEARCH"].includes(event.target.value);
+      fields.style.display = needsRevision ? "block" : "none";
+    });
+    const checked = form.querySelector("input[name=decision]:checked");
+    if (checked) {
+      fields.style.display = ["REQUEST_EDIT", "REQUEST_RESEARCH"].includes(checked.value) ? "block" : "none";
+    }
+    form.addEventListener("submit", submitReview);
+  } else if (snap.phase === "publish_confirmation") {
+    box.innerHTML = confirmCard(snap);
+    $("confirm-yes").addEventListener("click", () => submitConfirm(true));
+    $("confirm-no").addEventListener("click", () => submitConfirm(false));
+  } else {
+    box.innerHTML = outcomeCard(snap);
+  }
+}
+
+function renderArticle(snap) {
+  const card = $("article-card");
+  const article = snap.article;
+  if (!article) {
+    card.innerHTML = `<h3>稿件<span class="meta"></span></h3><div class="empty">尚未生成稿件</div>`;
+    return;
+  }
+  const id = article.article_id ? `${article.article_id} · v${article.version}` : `初稿 v${article.version || 1}`;
+  card.innerHTML = `
+    <h3>稿件<span class="meta">${esc(id)}</span></h3>
+    <div class="article-title">${esc(article.title)}</div>
+    <div class="prose">${esc(article.content)}</div>`;
+}
+
+function renderPlan(snap) {
+  const plan = snap.plan;
+  if (!plan) {
+    $("plan-card").innerHTML = `<h3>选题规划</h3><div class="empty">尚未生成规划</div>`;
+    return;
+  }
+  const list = (items) => `<ul class="chips">${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`;
+  $("plan-card").innerHTML = `
+    <h3>选题规划</h3>
+    <div class="section"><h4>选题分析</h4><div class="muted">${esc(plan.topic_analysis)}</div></div>
+    <div class="section"><h4>报道角度</h4>${list(plan.reporting_angles)}</div>
+    <div class="section"><h4>文章结构</h4>${list(plan.article_outline)}</div>
+    <div class="section"><h4>核查要点</h4>${list(plan.verification_points)}</div>`;
+}
+
+function renderFact(snap) {
+  const fact = snap.fact_check;
+  if (!fact) {
+    $("fact-card").innerHTML = `<h3>事实核查</h3><div class="empty">尚未核查</div>`;
+    return;
+  }
+  const claims = fact.claims.map((item) => `
+    <li>
+      <div class="top"><span>${esc(item.claim)}</span><span class="tag ${esc(item.result)}">${esc(item.result)}</span></div>
+      <p>${esc(item.reason)}</p>
+    </li>`).join("");
+  const issues = fact.issues && fact.issues.length
+    ? `<div class="section"><h4>问题</h4><ul class="plain">${fact.issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>`
+    : "";
+  $("fact-card").innerHTML = `
+    <h3>事实核查<span class="meta">${esc(fact.report_id)} · v${esc(fact.article_version)}</span></h3>
+    <p class="lead"><span class="tag ${esc(fact.overall_result)}">${esc(fact.overall_result)}</span></p>
+    <ul class="claims">${claims}</ul>${issues}`;
+}
+
+function renderSources(snap) {
+  const sources = snap.sources || [];
+  const card = $("sources-card");
+  if (!sources.length) {
+    card.innerHTML = `<h3>信息来源<span class="meta"></span></h3><div class="empty">尚未检索</div>`;
+    return;
+  }
+  const shown = sources.slice(0, 30);
+  const more = sources.length > shown.length ? `<p class="empty">另有 ${sources.length - shown.length} 条未展示</p>` : "";
+  card.innerHTML = `
+    <h3>信息来源<span class="meta">${sources.length} 条</span></h3>
+    <ul class="sources">${shown.map((item, index) => `
+      <li><span class="idx">${String(index + 1).padStart(2, "0")}</span>
+        <span><a href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.title)}</a>
+        ${item.publisher ? `<span class="pub"> · ${esc(item.publisher)}</span>` : ""}</span></li>`).join("")}
+    </ul>${more}`;
+}
+
+function renderLogs(snap) {
+  const logs = (snap.logs || []).slice().reverse();
+  if (!logs.length) {
+    $("logs-card").innerHTML = `<h3>执行日志</h3><div class="empty">暂无日志</div>`;
+    return;
+  }
+  $("logs-card").innerHTML = `
+    <h3>执行日志<span class="meta">${logs.length} 条</span></h3>
+    <table class="logs">
+      <thead><tr><th>节点</th><th>状态</th><th>开始</th><th>结束</th><th>备注</th></tr></thead>
+      <tbody>${logs.map((entry) => `
+        <tr>
+          <td>${esc(entry.agent)}</td>
+          <td class="st-${esc(entry.status)}">${esc(entry.status)}</td>
+          <td>${clock(entry.started_at)}</td>
+          <td>${clock(entry.finished_at)}</td>
+          <td>${esc(entry.error || "")}</td>
+        </tr>`).join("")}</tbody>
+    </table>`;
+}
+
+function render(snap) {
+  renderStatus(snap);
+  renderPipeline(snap);
+  renderAttention(snap);
+  renderArticle(snap);
+  renderPlan(snap);
+  renderFact(snap);
+  renderSources(snap);
+  renderLogs(snap);
+}
+
+function stopPolling() {
+  clearTimeout(timer);
+  timer = null;
+}
+
+async function pollTimer() {
+  try {
+    const snap = await call(`/tasks/${taskId}`);
+    render(snap);
+    if (snap.phase === "running") timer = setTimeout(pollTimer, 1300);
+  } catch (err) {
+    toast(err.message);
+    timer = setTimeout(pollTimer, 2600);
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  timer = setTimeout(pollTimer, 120);
+}
+
+async function submitReview(event) {
+  event.preventDefault();
+  if (submitting) return;
+  const form = event.currentTarget;
+  const checked = form.querySelector("input[name=decision]:checked");
+  if (!checked) return toast("请选择处理意见");
+  const decision = checked.value;
+  const needsRevision = ["REQUEST_EDIT", "REQUEST_RESEARCH"].includes(decision);
+  const requirements = ($("revision-requirements").value || "")
+    .split("\n").map((item) => item.trim()).filter(Boolean);
+  const reason = ($("revision-reason").value || "").trim();
+  if (needsRevision && (!reason || !requirements.length)) {
+    return toast("退回修改需要填写原因和至少一条要求");
+  }
+  submitting = true;
+  $("review-btn").disabled = true;
+  try {
+    await call(`/tasks/${taskId}/review`, {
+      method: "POST",
+      body: JSON.stringify({
+        decision,
+        comments: ($("review-comments").value || "").trim() || null,
+        revision_reason: needsRevision ? reason : null,
+        revision_requirements: needsRevision ? requirements : []
+      })
+    });
+    attentionKey = null;
+    $("attention").innerHTML = "";
+    startPolling();
+  } catch (err) {
+    toast(err.message);
+    $("review-btn").disabled = false;
+  } finally {
+    submitting = false;
+  }
+}
+
+async function submitConfirm(confirm) {
+  if (submitting) return;
+  submitting = true;
+  try {
+    await call(`/tasks/${taskId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ confirm })
+    });
+    attentionKey = null;
+    $("attention").innerHTML = "";
+    startPolling();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    submitting = false;
+  }
+}
+
+$("start-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const btn = $("start-btn");
+  btn.disabled = true;
+  try {
+    const focus = ($("focus").value || "")
+      .split(/[,，]/).map((item) => item.trim()).filter(Boolean);
+    const data = await call("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        topic: $("topic").value.trim(),
+        description: $("description").value.trim(),
+        requirements: {
+          style: $("style").value.trim() || "客观新闻报道",
+          target_length: Number($("target-length").value) || 1200,
+          focus
+        }
+      })
+    });
+    taskId = data.task_id;
+    localStorage.setItem(STORAGE_KEY, taskId);
+    attentionKey = null;
+    $("attention").innerHTML = "";
+    renderPipeline(null);
+    $("phase-pill").className = "pill running";
+    $("phase-pill").textContent = "运行中";
+    $("task-id").textContent = taskId;
+    startPolling();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+(async function init() {
+  renderPipeline(null);
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored) {
+    try {
+      taskId = stored;
+      const snap = await call(`/tasks/${stored}`);
+      render(snap);
+      if (snap.phase === "running") startPolling();
+    } catch (_) {
+      localStorage.removeItem(STORAGE_KEY);
+      taskId = null;
+    }
+  }
+  try {
+    const meta = await call("/meta");
+    const badge = (label, ok) => `<span class="badge ${ok ? "ok" : "bad"}">${label}${ok ? "已配置" : "未配置"}</span>`;
+    $("env").innerHTML = [
+      badge("LLM ", meta.llm_configured),
+      badge("搜索 ", meta.search_configured),
+      `<span class="badge">${esc(meta.llm_model)}</span>`,
+      `<span class="badge">退回上限 ${esc(meta.max_revision_rounds)}</span>`
+    ].join("");
+    if (!meta.llm_configured || !meta.search_configured) {
+      toast("后端尚未配置 LLM 或搜索 Key，发起任务会失败");
+    }
+  } catch (err) {
+    $("env").innerHTML = `<span class="badge bad">配置读取失败</span>`;
+    toast(err.message);
+  }
+})();
+</script>
+</body>
+</html>

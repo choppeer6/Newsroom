@@ -2,7 +2,7 @@
 
 **AI Newsroom 智能新闻编辑部**：基于大语言模型和多智能体协作技术的智能新闻采编系统，实现新闻选题分析、资料搜集、新闻撰写、稿件编辑、事实核查和审核发布的半自动化流程。
 
-> 当前阶段：**第 2 周已完成**。已落地 `NewsTaskState`、Agent 接口契约、FastAPI 骨架，以及 Reporter、Editor、Fact Checker 三个 Agent 的结构化逻辑；真实 DeepSeek + Tavily 全链路已验证。主编 Agent 与 LangGraph 编排将在第 3 周接入。
+> 当前阶段：**第 3 周已完成**。五个 Agent 全部落地，LangGraph 工作流包含条件路由、退回循环、人工审核中断与发布确认；真实 DeepSeek + Tavily 已从选题跑到待发布并完成确认发布（模拟发布通道）。下一步是第 4 周的数据持久化与任务管理。
 
 ## 项目基线
 
@@ -64,19 +64,19 @@ Newsroom/
 | --- | --- | --- | --- |
 | 01 | 产品需求规格说明书（PRD） | [docs/01-requirements/PRD.md](docs/01-requirements/PRD.md) | V0.1 |
 | 02 | 系统总体架构设计（HLD） | [docs/02-architecture/system-architecture.md](docs/02-architecture/system-architecture.md) | V0.1 |
-| 03 | Agent 设计说明书（统一规范） | [docs/03-agent-design/agent-specification.md](docs/03-agent-design/agent-specification.md) | V0.3 |
+| 03 | Agent 设计说明书（统一规范） | [docs/03-agent-design/agent-specification.md](docs/03-agent-design/agent-specification.md) | V0.4 |
 | 03 | 主编 Agent 详细设计 | [docs/03-agent-design/chief-editor-agent.md](docs/03-agent-design/chief-editor-agent.md) | 细化 |
 | 03 | 记者 Agent 详细设计 | [docs/03-agent-design/reporter-agent.md](docs/03-agent-design/reporter-agent.md) | 细化 |
 | 03 | 编辑 Agent 详细设计 | [docs/03-agent-design/editor-agent.md](docs/03-agent-design/editor-agent.md) | 细化 |
 | 03 | 事实核查 Agent 详细设计 | [docs/03-agent-design/fact-checker-agent.md](docs/03-agent-design/fact-checker-agent.md) | 细化 |
 | 03 | 审核发布 Agent 详细设计 | [docs/03-agent-design/publisher-agent.md](docs/03-agent-design/publisher-agent.md) | 细化 |
-| 04 | 工作流设计文档 | [docs/04-workflow/workflow-design.md](docs/04-workflow/workflow-design.md) | V0.1 |
+| 04 | 工作流设计文档 | [docs/04-workflow/workflow-design.md](docs/04-workflow/workflow-design.md) | V0.2 |
 | 05 | 数据库设计文档 | [docs/05-data-design/database-design.md](docs/05-data-design/database-design.md) | V0.1 |
 | 05 | 状态设计文档（NewsTaskState） | [docs/05-data-design/state-schema.md](docs/05-data-design/state-schema.md) | V0.2 |
 | 06 | API 接口设计文档 | [docs/06-api/api-specification.md](docs/06-api/api-specification.md) | V0.2 |
 | 07 | Prompt 与工具设计文档 | [docs/07-prompts/prompt-design.md](docs/07-prompts/prompt-design.md) | V0.2 |
-| 08 | 测试计划与验收文档 | [docs/08-testing/test-plan.md](docs/08-testing/test-plan.md) | V0.3 |
-| 09 | 开发实施计划（六周迭代） | [docs/09-development-plan/development-plan.md](docs/09-development-plan/development-plan.md) | V0.3 |
+| 08 | 测试计划与验收文档 | [docs/08-testing/test-plan.md](docs/08-testing/test-plan.md) | V0.4 |
+| 09 | 开发实施计划（六周迭代） | [docs/09-development-plan/development-plan.md](docs/09-development-plan/development-plan.md) | V0.4 |
 
 ## 开发路线
 
@@ -86,7 +86,7 @@ Newsroom/
 | --- | --- | --- |
 | 第 1 周（已完成） | 基础设施、State 与接口契约 | 项目可启动，模型可调用，任务 State 可生成 |
 | 第 2 周（已完成） | 记者 / 编辑 / 事实核查 Agent | 三个 Agent 可独立运行并有结构化输出 |
-| 第 3 周 | 主编 Agent 与 LangGraph 编排 | 核心新闻生产工作流（含条件路由与循环） |
+| 第 3 周（已完成） | 主编 Agent 与 LangGraph 编排 | 核心新闻生产工作流（含条件路由、循环、人工审核与发布确认），附临时联调页 `/demo` |
 | 第 4 周 | 数据持久化与任务管理 | 任务、版本、核查报告可保存、查询和恢复 |
 | 第 5 周 | 前端与发布机制 | 前后端联调，用户确认后发布 |
 | 第 6 周 | 测试、优化与交付 | 完整可演示项目与交付材料 |
@@ -113,6 +113,9 @@ uvicorn app.main:app --reload
 
 # 运行后端测试
 python -m pytest -q
+
+# 联调页（启动后端后）
+# http://127.0.0.1:8000/demo
 
 # frontend（待实现）
 cd frontend && npm install && npm run dev
