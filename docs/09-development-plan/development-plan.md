@@ -443,17 +443,20 @@ flowchart TD
 **已完成**
 
 - 新增 `ExecutionService`（`backend/app/services/execution_service.py`），负责正式任务的执行编排：
-  - `execute`：仅 `CREATED` 且未暂停的任务，同步推进到下一个暂停点（人工审核 / 待复核 / 失败 / 终止）；
-  - `pause` / `resume`：同步模式下的启动闸门，暂停后禁止执行，恢复后立即执行；
-  - `submit_human_review`：校验任务状态与待处理中断后恢复工作流，支持批准、退回修改、终止；
+  - `execute`：仅 `CREATED` 且未暂停的任务，校验通过后返回 `202` 并启动后台 `asyncio.Task`，把图运行到下一个暂停点（人工审核 / 待复核 / 失败 / 终止）；
+  - 后台作业每个状态分块落库（指纹变化才写），运行异常统一落 `FAILED` + `RUNTIME_ERROR`，并释放执行锁；
+  - `pause` / `resume`：暂停标记在节点边界生效，任务停止时保存为 `RUNNING + paused`；`resume` 从检查点续跑（`payload=None`），暂停尚未生效时返回 `2003`；
+  - `submit_human_review`：校验任务状态与待处理中断后，以 `Command(resume=payload)` 启动后台续跑，支持批准、退回修改、终止；
   - `confirm_delivery`：`PENDING_REVIEW` 下确认交付置为 `DELIVERED`，拒绝时保持待复核；
   - `list_events`：按序返回 Agent 执行事件。
 - 正式接口接入 `/api/news/tasks`：
-  - `POST /{task_id}/execute`、`/pause`、`/resume`；
-  - `POST /{task_id}/human-review`（批准 / 退回 / 终止，返回最新 `TaskDetail`）；
+  - `POST /{task_id}/execute`、`/pause`、`/resume`（execute / resume 返回 `202`）；
+  - `POST /{task_id}/human-review`（批准 / 退回 / 终止，返回 `202` 与最新 `TaskDetail`）；
   - `GET /{task_id}/delivery`、`POST /{task_id}/delivery/confirm`；
   - `GET /{task_id}/events`。
-- 所有写接口返回最新 `TaskDetail`，前端无需二次查询。
+- 写接口返回最新 `TaskDetail`，前端通过轮询 `GET /tasks/{id}` 获取后台推进结果。
+- 执行期间使用任务级执行锁（`execution_lock_ttl_seconds`，默认 900 秒）；并发启动返回业务码 `2003`；人工决策 / 恢复先等待收尾中的作业退出（最多 5 秒）。
+- 工作流新增 `stream` / `stream_continue` / `has_next_step`，支持按分块消费并在检查点续跑。
 - 执行期间使用任务级执行锁（`execution_lock_ttl_seconds`，默认 900 秒）；并发执行返回业务码 `2003`。
 - 运行时异常会落库为 `FAILED` + `RUNTIME_ERROR`，不会让任务停留在不可解释状态。
 - `create_app` 支持注入自定义工作流，便于测试与后续替换 Agent。
@@ -461,12 +464,12 @@ flowchart TD
 
 **验证结果**
 
-- 全量测试 `163 passed`；
-- 新增 `tests/test_execution_service.py`、`tests/test_api_execution.py`，覆盖执行、重复启动、暂停 / 恢复、执行锁冲突、人工批准 / 退回 / 终止、交付确认（确认与拒绝）、事件查询、参数校验、404 与运行时异常落库。
+- 全量测试 `165 passed`；
+- 新增 `tests/test_execution_service.py`、`tests/test_api_execution.py`，覆盖后台执行完成、重复启动、并发 `2003`、暂停 / 恢复（含暂停未生效重试）、执行锁冲突、人工批准 / 退回 / 终止、交付确认（确认与拒绝）、事件查询、参数校验、404 与运行时异常落库。
 
 **当前边界**
 
-- 执行采用同步推进，不创建后台任务；前端需要等待请求返回（默认工作流可能需要数十秒）；
+- 后台作业为单进程内 `asyncio.Task`，多副本部署需要改为外部任务队列（课程范围不涉及）；
 - 执行锁只防并发，不处理进程崩溃后的锁残留（TTL 到期释放）与重启恢复，C-06 继续；
 - 人工审核恢复依赖进程内 `MemorySaver` 检查点，服务重启后无法恢复（C-06）；
 - 接口失败重试计数（C-04）尚未接入执行日志与任务详情；

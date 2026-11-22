@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -121,6 +122,11 @@ def _coerce_state(raw: Any) -> NewsTaskState:
     return NewsTaskState.model_validate(data)
 
 
+state_from_values = _coerce_state
+
+_CONTINUE = object()
+
+
 def _interrupt_value(source: Any) -> dict[str, Any] | None:
     interrupts = source.get("__interrupt__") if isinstance(source, dict) else None
     if not interrupts:
@@ -183,3 +189,22 @@ class NewsroomWorkflow:
         if not snapshot or not snapshot.next:
             return False
         return bool(getattr(snapshot, "interrupts", None))
+
+    async def has_next_step(self, task_id: str) -> bool:
+        snapshot = await self._graph.aget_state(self._config(task_id))
+        return bool(snapshot and snapshot.next)
+
+    async def stream(self, state: NewsTaskState) -> AsyncIterator[dict[str, Any]]:
+        async for chunk in self._graph.astream(
+            state, self._config(state.task_id), stream_mode="values"
+        ):
+            yield chunk
+
+    async def stream_continue(
+        self, task_id: str, value: Any = _CONTINUE
+    ) -> AsyncIterator[dict[str, Any]]:
+        payload = None if value is _CONTINUE else Command(resume=value)
+        async for chunk in self._graph.astream(
+            payload, self._config(task_id), stream_mode="values"
+        ):
+            yield chunk

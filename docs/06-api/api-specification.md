@@ -158,9 +158,9 @@
 
 ### 3.5 `POST /api/news/tasks/{task_id}/execute` — 启动执行
 
-仅 `CREATED` 状态且未暂停的任务可执行。接口**同步推进到下一个暂停点**（人工审核、待复核、失败或终止），不创建后台任务。
+仅 `CREATED` 状态且未暂停的任务可执行。接口立即返回 `202 Accepted` 并在后台启动工作流，运行到下一个暂停点（人工审核、待复核、失败或终止）后自动停止；前端通过 `GET /tasks/{id}` 轮询进度。
 
-响应 `data` 为最新 `TaskDetail`：
+响应 `data` 为启动后的最新 `TaskDetail`（通常为 `RUNNING`）：
 
 ```json
 {
@@ -177,7 +177,8 @@
 }
 ```
 
-- 无人工介入时，执行在 `PENDING_REVIEW` 结束并返回交付材料摘要；
+- 后台执行期间 `status=RUNNING`，`current_stage` 随节点推进；
+- 无人工介入时，执行在 `PENDING_REVIEW` 结束并生成交付材料；
 - 任务正在执行（执行锁被占用）时返回 `2003`；
 - 非 `CREATED` 状态返回 `2002`；已暂停返回 `2002`。
 
@@ -185,11 +186,17 @@
 
 仅 `CREATED`、`RUNNING` 状态的未暂停任务可暂停；暂停后 `execute` / `resume` 被拒绝。响应 `data` 为最新 `TaskDetail`（`paused=true`）。
 
-> 同步执行模式下，暂停是启动前的闸门；执行请求本身会占用执行锁，执行期间收到的暂停请求返回 `2003`。
+- 后台执行中暂停：标记 `paused=true`，运行器在**当前节点结束后**停止，已完成的节点保留在检查点中；
+- 尚未启动的 `CREATED` 任务暂停后，不会自动开始执行；
+- 暂停请求返回后，任务将在当前节点结束时静止，`status` 仍为 `RUNNING`、`paused=true`。
 
 ### 3.7 `POST /api/news/tasks/{task_id}/resume` — 恢复任务
 
-仅已暂停的 `CREATED` 任务可恢复：清除 `paused` 后立即同步执行到下一个暂停点。响应 `data` 为最新 `TaskDetail`。
+仅已暂停的任务可恢复：清除 `paused` 后在后台从检查点继续执行，直到下一个暂停点。响应 `202`，`data` 为最新 `TaskDetail`。
+
+- 暂停的 `CREATED` 任务：从起点开始执行；
+- 暂停的 `RUNNING` 任务：从最后一个完成节点的检查点继续，不重复执行已完成节点；
+- 若暂停尚未生效（后台仍持有执行锁），返回 `2003`，稍后重试。
 
 ### 3.8 `GET /api/news/tasks/{task_id}/plan` — 获取采编计划
 
@@ -331,17 +338,16 @@
 - `TERMINATE` → 任务 `TERMINATED`；
 - 若事实核查为 `FAILED` 或专项检查为 `BLOCKED`，`APPROVE` 不会进入交付准备，任务保持 `HUMAN_REVIEW` 并在审核意见中说明原因；
 - 退回修改必须提供 `revision_reason` 与至少一条 `revision_requirements`；
-- 接口同步恢复工作流并推进到下一个暂停点，`data` 直接返回最新 `TaskDetail`。
-
-响应（`APPROVE` 且交付材料已生成）：
+- 接口立即返回 `202`，在后台从人工审核中断点恢复工作流并推进到下一个暂停点；
+- 响应 `data` 为恢复开始后的最新 `TaskDetail`（通常为 `RUNNING`），后续通过任务详情轮询结果。
 
 ```json
 {
   "task_id": "TASK_001",
-  "status": "PENDING_REVIEW",
-  "current_stage": "pending_review",
+  "status": "RUNNING",
+  "current_stage": "human_review",
   "human_decision": "APPROVE",
-  "delivery": { "package_id": "DLV_0001", "article_version": 2, "prepared_at": "..." }
+  "delivery": null
 }
 ```
 
@@ -486,10 +492,11 @@ C-05 已补齐执行、暂停、恢复、人工审核、交付确认与执行事
 
 执行服务约定：
 
-- 执行请求同步推进到下一个暂停点，不创建后台任务；
-- 执行期间持有任务级执行锁（默认 900 秒 TTL），并发执行返回 `2003`；
+- 执行请求立即返回 `202`，工作流在后台运行到下一个暂停点；
+- 后台运行期间持有任务级执行锁（默认 900 秒 TTL），并发执行返回 `2003`；
+- 暂停在节点边界生效：当前节点完成后停止，已完成节点保留在检查点中，恢复时从检查点继续；
 - 执行异常会被记录为 `FAILED` + `RUNTIME_ERROR` 并持久化；人工审核恢复需要进程内检查点存在（重启恢复在 C-06 实现）；
-- 暂停是启动前闸门：执行期间无法中断正在运行的同步请求。
+- 前端通过 `GET /tasks/{id}` 轮询 `status` 与 `current_stage`，通过 `GET /tasks/{id}/events` 查看已落库的执行事件。
 
 ### 11.2 已实现的通用约定
 

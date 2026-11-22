@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -55,8 +58,22 @@ HAPPY_RESPONSES = [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, APPROVE]
 HUMAN_RESPONSES = [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, HUMAN_REVIEW]
 
 
-def make_client(responses=None) -> TestClient:
-    llm = FakeLLM(responses or HAPPY_RESPONSES)
+class SlowLLM(FakeLLM):
+    def __init__(self, responses, delay: float = 0.03) -> None:
+        super().__init__(responses)
+        self.delay = delay
+
+    async def complete_json(self, **kwargs):
+        await asyncio.sleep(self.delay)
+        return await super().complete_json(**kwargs)
+
+
+def make_client(responses=None, *, slow: bool = False) -> TestClient:
+    llm = (
+        SlowLLM(responses or HAPPY_RESPONSES)
+        if slow
+        else FakeLLM(responses or HAPPY_RESPONSES)
+    )
     workflow = NewsroomWorkflow(
         agents=create_default_agents(
             llm=llm, search=FakeSearch(default=[make_hit()])
@@ -64,12 +81,6 @@ def make_client(responses=None) -> TestClient:
     )
     app = create_app(task_store=InMemoryTaskStore(), workflow=workflow)
     return TestClient(app)
-
-
-@pytest.fixture()
-def exec_client():
-    with make_client() as client:
-        yield client
 
 
 def create_task(client: TestClient) -> str:
@@ -84,50 +95,92 @@ def create_task(client: TestClient) -> str:
     return response.json()["data"]["task_id"]
 
 
-def test_execute_returns_latest_task_detail(exec_client):
-    task_id = create_task(exec_client)
-
-    response = exec_client.post(f"{API}/{task_id}/execute")
-
-    assert response.status_code == 200, response.text
-    data = response.json()["data"]
-    assert data["task_id"] == task_id
-    assert data["status"] == "PENDING_REVIEW"
-    assert data["current_stage"] == "pending_review"
-    assert data["article_version"] == 2
-    assert data["latest_special_check"]["result"] == "PASSED"
-    assert data["delivery"]["article_version"] == 2
+def wait_for_status(client: TestClient, task_id: str, *statuses, timeout=10.0):
+    deadline = time.time() + timeout
+    detail = None
+    while time.time() < deadline:
+        response = client.get(f"{API}/{task_id}")
+        assert response.status_code == 200, response.text
+        detail = response.json()["data"]
+        if detail["status"] in statuses:
+            return detail
+        time.sleep(0.02)
+    raise AssertionError(f"task {task_id} did not reach {statuses}: {detail}")
 
 
-def test_execute_twice_returns_conflict(exec_client):
-    task_id = create_task(exec_client)
-    exec_client.post(f"{API}/{task_id}/execute")
+def test_execute_returns_accepted_then_finishes_in_background():
+    with make_client() as client:
+        task_id = create_task(client)
 
-    repeat = exec_client.post(f"{API}/{task_id}/execute")
+        response = client.post(f"{API}/{task_id}/execute")
 
-    assert repeat.status_code == 409
-    assert repeat.json()["code"] == 2002
+        assert response.status_code == 202, response.text
+        started = response.json()["data"]
+        assert started["status"] == "RUNNING"
+        assert started["current_stage"] in {
+            "created",
+            "chief_planning",
+            "research",
+            "editing",
+            "fact_check",
+            "special_check",
+            "chief_review",
+            "prepare_delivery",
+        }
+
+        data = wait_for_status(client, task_id, "PENDING_REVIEW")
+        assert data["article_version"] == 2
+        assert data["latest_special_check"]["result"] == "PASSED"
+        assert data["delivery"]["article_version"] == 2
+
+
+def test_execute_twice_returns_conflict():
+    with make_client() as client:
+        task_id = create_task(client)
+        client.post(f"{API}/{task_id}/execute")
+        wait_for_status(client, task_id, "PENDING_REVIEW")
+
+        repeat = client.post(f"{API}/{task_id}/execute")
+
+        assert repeat.status_code == 409
+        assert repeat.json()["code"] == 2002
+
+
+def test_concurrent_execute_returns_busy_code():
+    with make_client(slow=True) as client:
+        task_id = create_task(client)
+        assert client.post(f"{API}/{task_id}/execute").status_code == 202
+
+        second = client.post(f"{API}/{task_id}/execute")
+
+        assert second.status_code == 409
+        assert second.json()["code"] == 2003
+        wait_for_status(client, task_id, "PENDING_REVIEW")
 
 
 def test_human_review_approve_and_deliver_flow():
     with make_client(HUMAN_RESPONSES) as client:
         task_id = create_task(client)
 
-        waiting = client.post(f"{API}/{task_id}/execute")
-        assert waiting.status_code == 200
-        assert waiting.json()["data"]["status"] == "HUMAN_REVIEW"
+        accepted = client.post(f"{API}/{task_id}/execute")
+        assert accepted.status_code == 202
+
+        waiting = wait_for_status(client, task_id, "HUMAN_REVIEW")
+        assert waiting["article_version"] == 2
 
         approved = client.post(
             f"{API}/{task_id}/human-review",
             json={"decision": "APPROVE", "comments": "人工确认通过"},
         )
-        assert approved.status_code == 200, approved.text
-        assert approved.json()["data"]["status"] == "PENDING_REVIEW"
+        assert approved.status_code == 202, approved.text
+        assert approved.json()["data"]["status"] == "RUNNING"
+
+        data = wait_for_status(client, task_id, "PENDING_REVIEW")
+        assert data["delivery"]["article_version"] == 2
 
         delivery = client.get(f"{API}/{task_id}/delivery")
         assert delivery.status_code == 200
         package = delivery.json()["data"]
-        assert package["article_version"] == 2
         assert package["special_check_report_id"]
 
         delivered = client.post(
@@ -141,6 +194,7 @@ def test_human_review_validation_error():
     with make_client(HUMAN_RESPONSES) as client:
         task_id = create_task(client)
         client.post(f"{API}/{task_id}/execute")
+        wait_for_status(client, task_id, "HUMAN_REVIEW")
 
         response = client.post(
             f"{API}/{task_id}/human-review",
@@ -151,73 +205,83 @@ def test_human_review_validation_error():
         assert response.json()["code"] == 1001
 
 
-def test_human_review_rejects_wrong_status(exec_client):
-    task_id = create_task(exec_client)
+def test_human_review_rejects_wrong_status():
+    with make_client() as client:
+        task_id = create_task(client)
 
-    response = exec_client.post(
-        f"{API}/{task_id}/human-review", json={"decision": "APPROVE"}
-    )
+        response = client.post(
+            f"{API}/{task_id}/human-review", json={"decision": "APPROVE"}
+        )
 
-    assert response.status_code == 409
-    assert response.json()["code"] == 2002
-
-
-def test_pause_and_resume_endpoints(exec_client):
-    task_id = create_task(exec_client)
-
-    paused = exec_client.post(f"{API}/{task_id}/pause")
-    assert paused.status_code == 200
-    assert paused.json()["data"]["paused"] is True
-
-    blocked = exec_client.post(f"{API}/{task_id}/execute")
-    assert blocked.status_code == 409
-
-    resumed = exec_client.post(f"{API}/{task_id}/resume")
-    assert resumed.status_code == 200, resumed.text
-    assert resumed.json()["data"]["paused"] is False
-    assert resumed.json()["data"]["status"] == "PENDING_REVIEW"
+        assert response.status_code == 409
+        assert response.json()["code"] == 2002
 
 
-def test_delivery_decline_keeps_pending_review(exec_client):
-    task_id = create_task(exec_client)
-    exec_client.post(f"{API}/{task_id}/execute")
+def test_pause_and_resume_endpoints():
+    with make_client() as client:
+        task_id = create_task(client)
 
-    response = exec_client.post(
-        f"{API}/{task_id}/delivery/confirm", json={"confirmed": False}
-    )
+        paused = client.post(f"{API}/{task_id}/pause")
+        assert paused.status_code == 200
+        assert paused.json()["data"]["paused"] is True
 
-    assert response.status_code == 200
-    assert response.json()["data"]["status"] == "PENDING_REVIEW"
-    assert response.json()["data"]["delivery"] is not None
+        blocked = client.post(f"{API}/{task_id}/execute")
+        assert blocked.status_code == 409
 
+        resumed = client.post(f"{API}/{task_id}/resume")
+        assert resumed.status_code == 202, resumed.text
+        assert resumed.json()["data"]["paused"] is False
 
-def test_delivery_confirm_requires_pending_review(exec_client):
-    task_id = create_task(exec_client)
-
-    response = exec_client.post(
-        f"{API}/{task_id}/delivery/confirm", json={"confirmed": True}
-    )
-
-    assert response.status_code == 409
-    assert response.json()["code"] == 2002
+        data = wait_for_status(client, task_id, "PENDING_REVIEW")
+        assert data["delivery"] is not None
 
 
-def test_events_list_returns_execution_logs(exec_client):
-    task_id = create_task(exec_client)
-    exec_client.post(f"{API}/{task_id}/execute")
+def test_delivery_decline_keeps_pending_review():
+    with make_client() as client:
+        task_id = create_task(client)
+        client.post(f"{API}/{task_id}/execute")
+        wait_for_status(client, task_id, "PENDING_REVIEW")
 
-    response = exec_client.get(f"{API}/{task_id}/events")
+        response = client.post(
+            f"{API}/{task_id}/delivery/confirm", json={"confirmed": False}
+        )
 
-    assert response.status_code == 200
-    events = response.json()["data"]
-    assert len(events) == 7
-    assert events[0]["agent_name"] == "chief_editor"
-    assert events[-1]["agent_name"] == "delivery_preparer"
-    assert all(event["finished_at"] for event in events)
+        assert response.status_code == 200
+        assert response.json()["data"]["status"] == "PENDING_REVIEW"
+        assert response.json()["data"]["delivery"] is not None
 
 
-def test_events_for_missing_task_returns_404(exec_client):
-    response = exec_client.get(f"{API}/TASK_MISSING/events")
+def test_delivery_confirm_requires_pending_review():
+    with make_client() as client:
+        task_id = create_task(client)
 
-    assert response.status_code == 404
-    assert response.json()["code"] == 2001
+        response = client.post(
+            f"{API}/{task_id}/delivery/confirm", json={"confirmed": True}
+        )
+
+        assert response.status_code == 409
+        assert response.json()["code"] == 2002
+
+
+def test_events_list_returns_execution_logs():
+    with make_client() as client:
+        task_id = create_task(client)
+        client.post(f"{API}/{task_id}/execute")
+        wait_for_status(client, task_id, "PENDING_REVIEW")
+
+        response = client.get(f"{API}/{task_id}/events")
+
+        assert response.status_code == 200
+        events = response.json()["data"]
+        assert len(events) == 7
+        assert events[0]["agent_name"] == "chief_editor"
+        assert events[-1]["agent_name"] == "delivery_preparer"
+        assert all(event["finished_at"] for event in events)
+
+
+def test_events_for_missing_task_returns_404():
+    with make_client() as client:
+        response = client.get(f"{API}/TASK_MISSING/events")
+
+        assert response.status_code == 404
+        assert response.json()["code"] == 2001

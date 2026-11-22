@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import BusyError, ConflictError, NotFoundError
 from app.graph.nodes import create_default_agents
 from app.graph.workflow import NewsroomWorkflow
 from app.schemas.domain import TaskRequirements
@@ -63,11 +63,31 @@ HUMAN_REVIEW = {
 HAPPY_RESPONSES = [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, APPROVE]
 HUMAN_RESPONSES = [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, HUMAN_REVIEW]
 
+RESTING = {
+    TaskStatus.HUMAN_REVIEW,
+    TaskStatus.PENDING_REVIEW,
+    TaskStatus.DELIVERED,
+    TaskStatus.FAILED,
+    TaskStatus.TERMINATED,
+}
 
-def build_service(responses=None, *, max_revision_rounds: int = 2):
+
+class SlowLLM(FakeLLM):
+    def __init__(self, responses, delay: float = 0.03) -> None:
+        super().__init__(responses)
+        self.delay = delay
+
+    async def complete_json(self, **kwargs):
+        await asyncio.sleep(self.delay)
+        return await super().complete_json(**kwargs)
+
+
+def build_service(responses=None, *, slow: bool = False, max_revision_rounds: int = 2):
     store = InMemoryTaskStore()
     tasks = TaskService(store)
-    llm = FakeLLM(responses or HAPPY_RESPONSES)
+    llm = SlowLLM(responses or HAPPY_RESPONSES) if slow else FakeLLM(
+        responses or HAPPY_RESPONSES
+    )
     workflow = NewsroomWorkflow(
         agents=create_default_agents(
             llm=llm, search=FakeSearch(default=[make_hit()])
@@ -77,217 +97,299 @@ def build_service(responses=None, *, max_revision_rounds: int = 2):
     return ExecutionService(tasks, workflow=workflow), tasks, llm
 
 
-def create_task(tasks: TaskService, topic: str = "人工智能在高校教育中的应用"):
-    return asyncio.run(
-        tasks.create_task(
-            topic=topic,
-            description="关注教学实践",
-            requirements=TaskRequirements(),
-        )
+async def create_task(tasks: TaskService, topic: str = "人工智能在高校教育中的应用"):
+    return await tasks.create_task(
+        topic=topic,
+        description="关注教学实践",
+        requirements=TaskRequirements(),
     )
 
 
-def test_execute_runs_to_pending_review_and_persists():
+async def wait_for_status(tasks: TaskService, task_id: str, *statuses, timeout=5.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        state = await tasks.get_task(task_id)
+        if state.task_status in statuses:
+            return state
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"task {task_id} did not reach {statuses}")
+
+
+async def wait_until_paused(service: ExecutionService, tasks: TaskService, task_id: str):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while loop.time() < deadline:
+        state = await tasks.get_task(task_id)
+        if state.paused and not service.is_running(task_id):
+            return state
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"task {task_id} did not pause")
+
+
+def test_execute_returns_running_then_reaches_pending_review():
     service, tasks, llm = build_service()
-    state = create_task(tasks)
 
-    outcome = asyncio.run(service.execute(state.task_id))
+    async def scenario():
+        created = await create_task(tasks)
+        started = await service.execute(created.task_id)
+        assert started.task_status == TaskStatus.RUNNING
 
-    assert outcome.interrupt is None
-    assert outcome.state.task_status == TaskStatus.PENDING_REVIEW
-    assert outcome.state.current_stage == WorkflowStage.PENDING_REVIEW
-    assert outcome.state.delivery_package is not None
+        finished = await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
+        assert finished.current_stage == WorkflowStage.PENDING_REVIEW
+        assert finished.delivery_package is not None
+        for _ in range(500):
+            if not service.is_running(created.task_id):
+                break
+            await asyncio.sleep(0.01)
+        assert not service.is_running(created.task_id)
+
+        events = await service.list_events(created.task_id)
+        return finished, events
+
+    finished, events = asyncio.run(scenario())
     assert len(llm.calls) == 7
-
-    stored = asyncio.run(tasks.get_task(state.task_id))
-    assert stored.task_status == TaskStatus.PENDING_REVIEW
-    assert stored.article_version == 2
-    assert stored.delivery_package is not None
-    events = asyncio.run(service.list_events(state.task_id))
     assert len(events) == 7
     assert events[0].agent_name.value == "chief_editor"
+    assert events[-1].agent_name.value == "delivery_preparer"
 
 
-def test_execute_rejects_second_start():
+def test_execute_rejects_second_start_after_completion():
     service, tasks, _ = build_service()
-    state = create_task(tasks)
-    asyncio.run(service.execute(state.task_id))
 
-    with pytest.raises(ConflictError, match="不允许执行"):
-        asyncio.run(service.execute(state.task_id))
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.PENDING_REVIEW)
+        with pytest.raises(ConflictError, match="不允许执行"):
+            await service.execute(created.task_id)
+
+    asyncio.run(scenario())
+
+
+def test_execute_rejects_concurrent_start():
+    service, tasks, _ = build_service(slow=True)
+
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        with pytest.raises(BusyError):
+            await service.execute(created.task_id)
+        await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW, timeout=10
+        )
+
+    asyncio.run(scenario())
 
 
 def test_execute_missing_task_returns_not_found():
     service, _, _ = build_service()
 
-    with pytest.raises(NotFoundError):
-        asyncio.run(service.execute("TASK_MISSING"))
+    async def scenario():
+        with pytest.raises(NotFoundError):
+            await service.execute("TASK_MISSING")
+
+    asyncio.run(scenario())
 
 
-def test_pause_blocks_execute_until_resume():
+def test_pause_before_start_blocks_execute_until_resume():
     service, tasks, _ = build_service()
-    state = create_task(tasks)
 
-    paused = asyncio.run(service.pause(state.task_id))
-    assert paused.paused is True
-    assert paused.task_status == TaskStatus.CREATED
+    async def scenario():
+        created = await create_task(tasks)
+        paused = await service.pause(created.task_id)
+        assert paused.paused is True
 
-    with pytest.raises(ConflictError, match="已暂停"):
-        asyncio.run(service.execute(state.task_id))
+        with pytest.raises(ConflictError, match="已暂停"):
+            await service.execute(created.task_id)
 
-    outcome = asyncio.run(service.resume(state.task_id))
-    assert outcome.state.paused is False
-    assert outcome.state.task_status == TaskStatus.PENDING_REVIEW
+        resumed = await service.resume(created.task_id)
+        assert resumed.paused is False
+        assert resumed.task_status == TaskStatus.RUNNING
+        finished = await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
+        return finished
+
+    finished = asyncio.run(scenario())
+    assert finished.delivery_package is not None
+
+
+def test_pause_stops_background_job_at_node_boundary_then_resume_continues():
+    service, tasks, _ = build_service(slow=True)
+
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await asyncio.sleep(0.05)
+
+        await service.pause(created.task_id)
+        paused = await wait_until_paused(service, tasks, created.task_id)
+        assert paused.task_status == TaskStatus.RUNNING
+        assert paused.current_stage != WorkflowStage.CREATED
+
+        resumed = await service.resume(created.task_id)
+        assert resumed.task_status == TaskStatus.RUNNING
+        return await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW, timeout=10
+        )
+
+    finished = asyncio.run(scenario())
+    assert finished.article_version == 2
+    assert finished.delivery_package is not None
 
 
 def test_pause_rejects_finished_task():
     service, tasks, _ = build_service()
-    state = create_task(tasks)
-    asyncio.run(service.execute(state.task_id))
-
-    with pytest.raises(ConflictError, match="不允许暂停"):
-        asyncio.run(service.pause(state.task_id))
-
-
-def test_pause_rejects_while_execution_lock_is_held():
-    service, tasks, _ = build_service()
-    state = create_task(tasks)
 
     async def scenario():
-        assert await tasks.try_acquire_lock(
-            state.task_id, "external", ttl_seconds=60
-        )
-        try:
-            with pytest.raises(ConflictError, match="正在执行"):
-                await service.pause(state.task_id)
-        finally:
-            await tasks.release_lock(state.task_id, "external")
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.PENDING_REVIEW)
+        with pytest.raises(ConflictError, match="不允许暂停"):
+            await service.pause(created.task_id)
 
     asyncio.run(scenario())
 
 
 def test_human_review_approve_prepares_delivery_then_confirm_delivers():
     service, tasks, _ = build_service(HUMAN_RESPONSES)
-    state = create_task(tasks)
 
-    waiting = asyncio.run(service.execute(state.task_id))
-    assert waiting.state.task_status == TaskStatus.HUMAN_REVIEW
-    assert waiting.interrupt is not None
-    assert waiting.interrupt["special_check_result"] == "PASSED"
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        waiting = await wait_for_status(
+            tasks, created.task_id, TaskStatus.HUMAN_REVIEW
+        )
+        assert waiting.delivery_package is None
 
-    approved = asyncio.run(
-        service.submit_human_review(
-            state.task_id,
+        started = await service.submit_human_review(
+            created.task_id,
             decision=HumanDecision.APPROVE,
             comments="人工确认通过",
         )
-    )
-    assert approved.state.task_status == TaskStatus.PENDING_REVIEW
-    assert approved.state.human_decision == HumanDecision.APPROVE
-    assert approved.state.delivery_package is not None
+        assert started.task_status == TaskStatus.RUNNING
 
-    package = asyncio.run(service.get_delivery(state.task_id))
+        approved = await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
+        package = await service.get_delivery(created.task_id)
+        delivered = await service.confirm_delivery(
+            created.task_id, confirmed=True
+        )
+        return approved, package, delivered
+
+    approved, package, delivered = asyncio.run(scenario())
+    assert approved.human_decision == HumanDecision.APPROVE
     assert package.article_version == 2
-
-    delivered = asyncio.run(
-        service.confirm_delivery(state.task_id, confirmed=True)
-    )
     assert delivered.task_status == TaskStatus.DELIVERED
     assert delivered.current_stage == WorkflowStage.DELIVERED
 
 
 def test_delivery_decline_keeps_pending_review():
     service, tasks, _ = build_service()
-    state = create_task(tasks)
-    asyncio.run(service.execute(state.task_id))
 
-    kept = asyncio.run(service.confirm_delivery(state.task_id, confirmed=False))
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.PENDING_REVIEW)
+        kept = await service.confirm_delivery(
+            created.task_id, confirmed=False
+        )
+        return kept, await tasks.get_task(created.task_id)
 
+    kept, stored = asyncio.run(scenario())
     assert kept.task_status == TaskStatus.PENDING_REVIEW
-    stored = asyncio.run(tasks.get_task(state.task_id))
     assert stored.task_status == TaskStatus.PENDING_REVIEW
     assert stored.delivery_package is not None
 
 
 def test_human_review_can_request_edit_and_rerun_pipeline():
-    responses = [
-        *HUMAN_RESPONSES,
-        EDIT,
-        EXTRACT,
-        VERIFY,
-        APPROVE,
-    ]
+    responses = [*HUMAN_RESPONSES, EDIT, EXTRACT, VERIFY, APPROVE]
     service, tasks, _ = build_service(responses)
-    state = create_task(tasks)
-    asyncio.run(service.execute(state.task_id))
 
-    outcome = asyncio.run(
-        service.submit_human_review(
-            state.task_id,
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.HUMAN_REVIEW)
+        await service.submit_human_review(
+            created.task_id,
             decision=HumanDecision.REQUEST_EDIT,
             revision_reason="结构不符合要求",
             revision_requirements=["重写导语"],
         )
-    )
+        return await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
 
-    assert outcome.state.task_status == TaskStatus.PENDING_REVIEW
-    assert outcome.state.revision_round == 1
-    assert outcome.state.article_version == 3
+    outcome = asyncio.run(scenario())
+    assert outcome.revision_round == 1
+    assert outcome.article_version == 3
 
 
 def test_human_review_can_terminate():
     service, tasks, _ = build_service(HUMAN_RESPONSES)
-    state = create_task(tasks)
-    asyncio.run(service.execute(state.task_id))
 
-    outcome = asyncio.run(
-        service.submit_human_review(
-            state.task_id, decision=HumanDecision.TERMINATE
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.HUMAN_REVIEW)
+        await service.submit_human_review(
+            created.task_id, decision=HumanDecision.TERMINATE
         )
-    )
+        return await wait_for_status(
+            tasks, created.task_id, TaskStatus.TERMINATED
+        )
 
-    assert outcome.state.task_status == TaskStatus.TERMINATED
-    assert outcome.state.current_stage == WorkflowStage.TERMINATED
+    outcome = asyncio.run(scenario())
+    assert outcome.current_stage == WorkflowStage.TERMINATED
 
 
 def test_human_review_requires_pending_interrupt():
     service, tasks, _ = build_service()
-    state = create_task(tasks)
-    asyncio.run(service.execute(state.task_id))
 
-    with pytest.raises(ConflictError, match="待人工处理"):
-        asyncio.run(
-            service.submit_human_review(
-                state.task_id, decision=HumanDecision.APPROVE
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.PENDING_REVIEW)
+        with pytest.raises(ConflictError, match="待人工处理"):
+            await service.submit_human_review(
+                created.task_id, decision=HumanDecision.APPROVE
             )
-        )
+
+    asyncio.run(scenario())
 
 
 def test_delivery_confirm_requires_pending_review():
     service, tasks, _ = build_service()
-    state = create_task(tasks)
 
-    with pytest.raises(ConflictError, match="待复核"):
-        asyncio.run(service.confirm_delivery(state.task_id, confirmed=True))
-    with pytest.raises(ConflictError, match="尚未生成"):
-        asyncio.run(service.get_delivery(state.task_id))
+    async def scenario():
+        created = await create_task(tasks)
+        with pytest.raises(ConflictError, match="待复核"):
+            await service.confirm_delivery(created.task_id, confirmed=True)
+        with pytest.raises(ConflictError, match="尚未生成"):
+            await service.get_delivery(created.task_id)
+
+    asyncio.run(scenario())
 
 
 def test_execute_marks_task_failed_on_runtime_error():
     class BrokenWorkflow:
-        async def run(self, state):
+        async def stream(self, state):
             raise RuntimeError("checkpoint unavailable")
+            yield  # pragma: no cover
 
-    store = InMemoryTaskStore()
-    tasks = TaskService(store)
+    tasks = TaskService(InMemoryTaskStore())
     service = ExecutionService(tasks, workflow=BrokenWorkflow())
-    state = create_task(tasks)
 
-    outcome = asyncio.run(service.execute(state.task_id))
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        return await wait_for_status(tasks, created.task_id, TaskStatus.FAILED)
 
-    assert outcome.state.task_status == TaskStatus.FAILED
-    assert outcome.state.current_stage == WorkflowStage.ERROR
-    assert outcome.state.error is not None
-    assert outcome.state.error.code == "RUNTIME_ERROR"
-    stored = asyncio.run(tasks.get_task(state.task_id))
-    assert stored.task_status == TaskStatus.FAILED
+    failed = asyncio.run(scenario())
+    assert failed.current_stage == WorkflowStage.ERROR
+    assert failed.error is not None
+    assert failed.error.code == "RUNTIME_ERROR"

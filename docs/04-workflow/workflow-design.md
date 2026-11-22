@@ -255,11 +255,12 @@ def route_after_human_approval(state: NewsTaskState) -> str:
 ### 6.4 暂停与恢复
 
 - 使用 LangGraph Checkpointer 保存每个节点执行后的状态，`thread_id = task_id`；
-- 执行服务采用**同步推进**：`execute` / `human-review` / `resume` 请求会运行到下一个暂停点（人工审核、待复核、失败或终止）后返回，不创建后台任务；
-- 执行期间持有任务级执行锁（默认 900 秒 TTL），并发执行返回 `2003`；
+- 执行服务采用**后台任务模式**：`execute` / `human-review` / `resume` 校验通过后返回 `202` 与最新 `TaskDetail`，同时在进程内启动 `asyncio.Task`，把图运行到下一个暂停点（人工审核、待复核、失败或终止）；前端轮询 `GET /tasks/{id}` 观察进度；
+- 后台任务每个 `stream_mode="values"` 分块都落一次状态（指纹变化时才写），进程内异常统一落 `FAILED / RUNTIME_ERROR`，任务不会悬挂在 `RUNNING`；
+- 执行期间持有任务级执行锁（默认 900 秒 TTL），并发启动返回 `2003`；人工决策 / 恢复接口会先等待正在收尾的任务退出（最多 5 秒），再判定锁占用；
 - 停在 `human_approval` 阶段的任务，必须通过人工接口恢复；恢复前校验检查点存在待处理的中断；
 - `PENDING_REVIEW` 阶段不再恢复图，由执行服务更新交付 / 终止状态；
-- 暂停是同步模式下的启动闸门：`pause` 后 `execute` / `resume` 被拒绝，`resume` 清除暂停并立即执行；
+- 暂停采用**节点边界生效**：`pause` 只置暂停标记，正在运行的任务在下一个节点边界停止，状态保存为 `RUNNING + paused`；`resume` 从检查点续跑（`payload=None`），暂停尚未生效时返回 `2003` 提示重试；
 - 任务失败或服务重启后的检查点恢复仍待 C-06 实现；`MemorySaver` 不跨进程保留；
 - 恢复时不得重复执行已完成节点（幂等：来源按 URL 去重、稿件版本按 `(article_id, version)` 唯一）。
 
@@ -414,16 +415,17 @@ result = await workflow.resume("TASK_001", {"decision": "APPROVE", "comments": "
 
 - 2026-11-14（第 3 周）：自动化测试 120 项通过，真实 DeepSeek + Tavily 冒烟到达 `PUBLISHED`（旧发布链，已按分工文档废弃）。
 - 2026-11-22（第 4 周）：全量测试 163 项通过；正常链路到达 `PENDING_REVIEW` 并生成交付材料包；修改轮次、硬阻断、人工终止、失败节点等分支均有覆盖。
-- 2026-11-22（C-05）：执行服务与接口测试覆盖同步执行、暂停 / 恢复、人工批准 / 退回 / 终止、交付确认、执行事件、执行锁冲突与运行时异常落库。
+- 2026-11-22（C-05）：执行服务与接口测试覆盖后台执行、暂停 / 恢复、人工批准 / 退回 / 终止、交付确认、执行事件、执行锁冲突与运行时异常落库。
 - 尚未覆盖：接口失败重试独立计数（C-04）、进程重启恢复与重复启动防护（C-06）、真实专项检查规则、SSE 实时进度。
 
 ### 10.6 执行服务（C-05）
 
 | 模块 | 位置 | 说明 |
 | --- | --- | --- |
-| 执行服务 | `backend/app/services/execution_service.py` | 同步执行、暂停 / 恢复、人工审核、交付确认、事件查询；执行锁与失败落库 |
+| 执行服务 | `backend/app/services/execution_service.py` | 后台任务调度、暂停 / 恢复、人工审核、交付确认、事件查询；执行锁与失败落库 |
 | 正式接口 | `backend/app/api/routes/tasks.py` | `execute / pause / resume / human-review / delivery / delivery/confirm / events` |
 | 执行锁 TTL | `Settings.execution_lock_ttl_seconds` | 默认 900 秒，防止并发执行同一任务 |
-| 检查点状态 | `NewsroomWorkflow.has_pending_interrupt` | 恢复人工审核前确认存在待处理中断 |
+| 检查点状态 | `NewsroomWorkflow.has_next_step / has_pending_interrupt` | 恢复前确认检查点可续跑、人工恢复确认存在待处理中断 |
+| 后台作业 | `ExecutionJob` | 记录当前任务句柄、最新状态与暂停标记；运行结束或异常后释放并删除 |
 
 写接口统一返回最新 `TaskDetail`，便于前端一次拿到执行结果；异常约定：状态不允许 `2002`，执行锁占用 `2003`，参数错误 `1001`，任务不存在 `2001`。

@@ -87,14 +87,16 @@ async def cancel_task(
     return ok(request, TaskSummary.from_state(state))
 
 
-@router.post("/{task_id}/execute", response_model=ApiResponse[TaskDetail])
+@router.post(
+    "/{task_id}/execute", response_model=ApiResponse[TaskDetail], status_code=202
+)
 async def execute_task(
     task_id: str,
     request: Request,
     service: ExecutionService = Depends(get_execution_service),
 ) -> ApiResponse[TaskDetail]:
-    outcome = await service.execute(task_id)
-    return ok(request, TaskDetail.from_state(outcome.state))
+    state = await service.execute(task_id)
+    return ok(request, TaskDetail.from_state(state))
 
 
 @router.post("/{task_id}/pause", response_model=ApiResponse[TaskDetail])
@@ -107,31 +109,35 @@ async def pause_task(
     return ok(request, TaskDetail.from_state(state))
 
 
-@router.post("/{task_id}/resume", response_model=ApiResponse[TaskDetail])
+@router.post(
+    "/{task_id}/resume", response_model=ApiResponse[TaskDetail], status_code=202
+)
 async def resume_task(
     task_id: str,
     request: Request,
     service: ExecutionService = Depends(get_execution_service),
 ) -> ApiResponse[TaskDetail]:
-    outcome = await service.resume(task_id)
-    return ok(request, TaskDetail.from_state(outcome.state))
+    state = await service.resume(task_id)
+    return ok(request, TaskDetail.from_state(state))
 
 
-@router.post("/{task_id}/human-review", response_model=ApiResponse[TaskDetail])
+@router.post(
+    "/{task_id}/human-review", response_model=ApiResponse[TaskDetail], status_code=202
+)
 async def submit_human_review(
     task_id: str,
     payload: HumanReviewRequest,
     request: Request,
     service: ExecutionService = Depends(get_execution_service),
 ) -> ApiResponse[TaskDetail]:
-    outcome = await service.submit_human_review(
+    state = await service.submit_human_review(
         task_id,
         decision=payload.decision,
         comments=payload.comments,
         revision_reason=payload.revision_reason,
         revision_requirements=payload.revision_requirements,
     )
-    return ok(request, TaskDetail.from_state(outcome.state))
+    return ok(request, TaskDetail.from_state(state))
 
 
 @router.get("/{task_id}/delivery", response_model=ApiResponse[DeliveryPackage])
