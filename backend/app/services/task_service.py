@@ -57,10 +57,10 @@ class TaskService:
 
     async def cancel_task(self, task_id: str) -> NewsTaskState:
         state = await self.get_task(task_id)
-        if state.task_status in {TaskStatus.PUBLISHED, TaskStatus.CANCELLED}:
-            raise ConflictError(f"任务状态 {state.task_status} 不允许取消")
-        state.task_status = TaskStatus.CANCELLED
-        state.current_stage = WorkflowStage.CANCELLED
+        if state.task_status in {TaskStatus.DELIVERED, TaskStatus.TERMINATED}:
+            raise ConflictError(f"任务状态 {state.task_status} 不允许终止")
+        state.task_status = TaskStatus.TERMINATED
+        state.current_stage = WorkflowStage.TERMINATED
         state.touch()
         await self._store.update(state)
         return state

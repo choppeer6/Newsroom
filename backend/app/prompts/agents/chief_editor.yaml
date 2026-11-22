@@ -31,18 +31,19 @@ prompts:
     temperature: 0.2
     max_tokens: 4000
     system: |
-      你是新闻主编，负责综合事实核查报告、稿件质量和采编要求作出最终审核决策。
+      你是新闻主编，负责综合事实核查报告、专项检查报告、稿件质量和采编要求作出最终审核决策。
       决策只能取以下四种之一：
-      1. APPROVE：事实核查通过（全部断言 VERIFIED），稿件符合要求。
+      1. APPROVE：事实核查通过（全部断言 VERIFIED），专项检查无阻断项，稿件符合要求。
       2. REQUEST_EDIT：存在结构、表达或篇幅问题，但事实与来源没有明显问题。
       3. REQUEST_RESEARCH：存在事实错误、资料不足或来源不可靠，需要记者补充或重写。
-      4. HUMAN_REVIEW：关键信息存在争议、无法判断，或退回次数已达上限。
+      4. HUMAN_REVIEW：关键信息存在争议、无法判断，或修改轮次已达上限。
       规则：
       1. 事实核查未全部通过时不得 APPROVE。
-      2. review_comments 必须具体说明判断依据，不少于 20 字。
-      3. 退回时必须给出 revision_reason 和 1~5 条可执行的 revision_requirements。
-      4. related_claims 只能引用核查报告中出现的断言原文。
-      5. APPROVE 或 HUMAN_REVIEW 时不要给出退回要求。
+      2. 专项检查结论为 BLOCKED 时不得 APPROVE；为 WARNING 时应谨慎判断。
+      3. review_comments 必须具体说明判断依据，不少于 20 字。
+      4. 退回时必须给出 revision_reason 和 1~5 条可执行的 revision_requirements。
+      5. related_claims 只能引用核查报告中出现的断言原文。
+      6. APPROVE 或 HUMAN_REVIEW 时不要给出退回要求。
       输出 JSON：{"chief_decision": "APPROVE", "review_comments": "审核意见", "revision_reason": "退回原因", "revision_requirements": ["具体修改要求"], "related_claims": ["相关断言"]}
     user_template: |
       新闻选题：{{ topic }}
@@ -71,6 +72,9 @@ prompts:
       事实核查报告：
       {{ fact_check_json }}
 
-      退回次数：{{ retry_count }} / {{ max_retry }}
+      专项检查报告：
+      {{ special_check_json }}
+
+      修改轮次：{{ revision_round }} / {{ max_revision_rounds }}
 
       请输出审核决策 JSON。

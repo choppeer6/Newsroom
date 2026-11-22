@@ -3,14 +3,15 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | NR-WF-001 |
-| 文档版本 | V0.2 |
+| 文档版本 | V0.3 |
 | 工作流框架 | LangGraph |
-| 日期 | 2026-11-14 |
-| 状态 | 已实现并接入内存检查点（第 3 周） |
+| 日期 | 2026-11-22 |
+| 状态 | 已按分工文档调整为「专项检查 + 预发布准备」链（第 4 周） |
 | 关联文档 | [Agent 设计](../03-agent-design/agent-specification.md)、[状态设计](../05-data-design/state-schema.md)、[API 规范](../06-api/api-specification.md) |
 
 > **关键原则**：Agent 的执行顺序与 Agent 的决策权不是一回事。
-> 记者完成后进入编辑，编辑完成后进入事实核查；但事实核查完成后**不应自动进入发布**，必须先回到主编进行决策。
+> 记者完成后进入编辑，编辑完成后进入事实核查；事实核查之后还要经过专项检查，再回到主编决策。
+> 系统**不对外发布**：审核通过后只准备交付材料并进入「待复核」，由用户自行复核、导出和提交。
 
 ---
 
@@ -41,11 +42,11 @@
 | `reporter` | 记者 Agent | 搜集资料和撰写初稿 |
 | `editor` | 编辑 Agent | 修改和优化稿件 |
 | `fact_checker` | 事实核查 Agent | 核实新闻事实 |
-| `chief_review` | 主编 Agent | 综合审核和决策 |
-| `publisher` | 审核发布 Agent | 待发布管理 |
-| `human_approval` | 人工审核节点 | 等待用户 / 人工确认 |
-| `publish` | 发布执行节点 | 执行正式发布 |
-| `END` | 系统结束 | 任务完成或终止 |
+| `special_check` | 专项检查 Agent | 内容规范与敏感信息检查（当前为确定性桩） |
+| `chief_review` | 主编 Agent | 综合核查、专项检查与稿件质量作出决策 |
+| `human_approval` | 人工审核节点 | 主编转人工时以 `interrupt()` 暂停 |
+| `prepare_delivery` | 预发布准备 Agent | 组装交付材料包（稿件、核查报告、专项检查、来源） |
+| `END` | 系统结束 | 进入待复核 / 已交付 / 失败 / 终止 |
 
 ```mermaid
 flowchart TD
@@ -53,25 +54,23 @@ flowchart TD
     CP --> R["记者：资料搜集与初稿撰写"]
     R --> E["编辑：稿件修改与润色"]
     E --> F["事实核查：验证关键信息"]
-    F --> CR["主编：综合审核"]
+    F --> S["专项检查：内容规范与敏感信息"]
+    S --> CR["主编：综合审核"]
     CR --> D{"审核决策"}
 
     D -->|REQUEST_RESEARCH| R
     D -->|REQUEST_EDIT| E
-    D -->|HUMAN_REVIEW| H["人工审核"]
-    D -->|APPROVE| P["审核发布 Agent"]
+    D -->|HUMAN_REVIEW| H["人工审核（interrupt）"]
+    D -->|APPROVE| P["准备交付材料"]
 
     H -->|通过| P
     H -->|修改| E
     H -->|补充资料| R
     H -->|终止| END([END])
 
-    P --> U["用户确认"]
-    U -->|确认| PUB["执行发布"]
-    U -->|拒绝或暂缓| WAIT["保持待发布状态"]
-    WAIT --> U
-
-    PUB --> END
+    P --> PR["待复核（PENDING_REVIEW）"]
+    PR -->|用户确认交付| DL["已交付（DELIVERED）"]
+    PR -->|用户暂不交付| PR
 ```
 
 ---
@@ -107,57 +106,59 @@ flowchart TD
 - **输入**：编辑后的稿件及记者提供的资料来源。
 - **处理**：抽取事实声明，调用搜索工具核实，生成结构化核查报告。
 - **输出**：`fact_check_report`（含 `overall_result`、`claims`、`issues`、`recommendation`）。
-- **下一步**：`chief_review`。
-- **状态**：`FACT_CHECKING → REVIEWING`。
-- **重要**：核查结果**不直接决定后续节点**，只作为主编决策依据。
+- **下一步**：`special_check`。
+- **状态**：`RUNNING`，阶段 `fact_check → special_check`。
+- **重要**：核查结果**不直接决定后续节点**，只作为专项检查和主编决策的依据。
 
-### 3.5 主编审核节点（`chief_review`）
+### 3.5 专项检查节点（`special_check`）
+
+- **输入**：编辑稿、版本号、事实核查报告、来源列表。
+- **处理**：检查内容规范、敏感信息、隐私与合规风险。当前实现为确定性桩（`SpecialCheckAgent`），固定返回 `PASSED`；D 模块接入真实规则引擎后替换实现。
+- **输出**：`special_check_report`（`result ∈ PASSED / WARNING / BLOCKED`，`issues` 含 `INFO / WARNING / BLOCKING`）。
+- **下一步**：`chief_review`。
+- **状态**：`RUNNING`，阶段 `special_check → chief_review`。
+
+### 3.6 主编审核节点（`chief_review`）
 
 - **输入**：
-  - 原始新闻选题；
-  - 最初的采编计划；
-  - 记者提供的新闻资料；
-  - 当前编辑后的稿件；
-  - 事实核查报告；
-  - 历史修改意见。
-- **处理**：主编 Agent 综合判断，返回明确审核决策。
+  - 原始新闻选题、采编计划、资料来源；
+  - 当前编辑后的稿件（版本号）；
+  - 绑定了同一 `article_id + article_version` 的事实核查报告与专项检查报告；
+  - 当前修改轮次 `revision_round` 与上限 `max_revision_rounds`。
+- **处理**：主编 Agent 综合判断，返回明确审核决策；代码层再执行安全约束。
 - **输出**：`chief_decision`、`review_comments`、`revision_request`（退回时）。
-- **状态**：`REVIEWING`。
+- **状态**：`RUNNING`（阶段 `revision_required` 或 `prepare_delivery`）或 `HUMAN_REVIEW`。
 
 四种决策：
 
 | 决策 | 含义 | 后续节点 |
 | --- | --- | --- |
-| `APPROVE` | 审核通过 | `publisher` |
+| `APPROVE` | 事实核查与专项检查均无阻断，稿件符合要求 | `prepare_delivery` |
 | `REQUEST_EDIT` | 表达、结构或风格问题 | `editor` |
 | `REQUEST_RESEARCH` | 事实错误、资料不足或来源不可靠 | `reporter` |
-| `HUMAN_REVIEW` | 存在争议或关键信息无法确定 | `human_approval` |
+| `HUMAN_REVIEW` | 存在争议、无法判断，或修改轮次已达上限 | `human_approval` |
 
-### 3.6 审核发布节点（`publisher`）
+代码层安全约束（不依赖模型自觉）：
 
-- **前置条件**：`chief_decision == "APPROVE"`，且事实核查 `overall_result` 不为 `FAILED`。
-- **处理**：检查稿件完整性与审核状态，创建待发布记录，并通过 `interrupt()` 等待用户确认；确认接口恢复图执行。
-- **输出**：`publication.status = "PENDING_PUBLISH"`。
-- **下一步**：用户确认后进入 `publish`；用户暂缓时不恢复图，任务保持待发布。
-- **状态**：`PENDING_PUBLISH`。
-- **约束**：只接受主编审核通过的稿件。
-- **实现说明**：第 3 周将「创建待发布记录」与「等待用户确认」拆成两个节点——`publisher` 创建待发布记录，`user_confirmation` 用 `interrupt()` 暂停，确认后进入 `publish`；未确认则结束并保持 `PENDING_PUBLISH`。见第 10 节。
+1. 事实核查不为 `PASSED` 时，`APPROVE` 降级为 `HUMAN_REVIEW`；
+2. 专项检查为 `BLOCKED` 时，`APPROVE` 降级为 `HUMAN_REVIEW`；
+3. 专项检查为 `WARNING` 时保留 `APPROVE`，但在审核意见中提示人工复核；
+4. `revision_round >= max_revision_rounds` 时，任何退回决策强制转为 `HUMAN_REVIEW`。
 
 ### 3.7 人工审核节点（`human_approval`）
 
 - **触发**：主编决策为 `HUMAN_REVIEW`。
-- **处理**：工作流以 `interrupt()` 暂停，等待人工决定。
-- **可选决定**：通过、修改、补充资料、终止。
-- **路由**：通过 → `publisher`；修改 → `editor`；补充资料 → `reporter`；终止 → `END`。
-- **状态**：`HUMAN_REVIEW`。
+- **处理**：工作流以 `interrupt()` 暂停，等待人工决定（通过 / 修改 / 补充资料 / 终止）。
+- **路由**：通过 → `prepare_delivery`；修改 → `editor`；补充资料 → `reporter`；终止 → `END`。
+- **状态**：`HUMAN_REVIEW`；终止后为 `TERMINATED`。
+- **约束**：人工通过不能覆盖硬阻断。若事实核查为 `FAILED` 或专项检查为 `BLOCKED`，系统拒绝进入交付准备，任务保持 `HUMAN_REVIEW` 并在审核意见中说明原因。
 
-### 3.8 发布节点（`publish`）
+### 3.8 预发布准备节点（`prepare_delivery`）
 
-- **前置条件**：`publication.status == "PENDING_PUBLISH"` 且 `user_confirmation == true`。
-- **处理**：调用新闻发布接口（首期可使用 Mock），保存发布结果。
-- **输出**：`publication.status = "PUBLISHED"`、`published_at`、`external_url`。
-- **失败处理**：保留稿件与待发布记录，记录错误，允许重试。
-- **状态**：成功 `PUBLISHED`；失败保持 `PENDING_PUBLISH`（`publication.status = FAILED`）。
+- **前置条件**：主编或人工审核通过；事实核查不为 `FAILED`；专项检查不为 `BLOCKED`；两份报告均绑定当前稿件版本。
+- **处理**：组装 `DeliveryPackage`，包含任务、稿件版本、事实核查报告编号、专项检查报告编号、来源编号与准备时间。当前为确定性实现，不调用外部接口。
+- **输出**：`delivery_package`；任务状态 `PENDING_REVIEW`，阶段 `pending_review`。
+- **后续**：用户复核后可导出并自行提交；系统不执行对外发布。用户确认交付后任务进入 `DELIVERED`，确认动作由执行服务 / 演示接口完成，不在图内。
 
 ---
 
@@ -169,80 +170,68 @@ flowchart TD
 
 ```python
 def route_after_review(state: NewsTaskState) -> str:
-    decision = state["chief_decision"]
+    decision = state.chief_decision
 
-    if decision == "APPROVE":
-        return "publisher"
-    if decision == "REQUEST_EDIT":
+    if decision == ChiefDecision.APPROVE:
+        return "prepare_delivery"
+    if decision == ChiefDecision.REQUEST_EDIT:
         return "editor"
-    if decision == "REQUEST_RESEARCH":
+    if decision == ChiefDecision.REQUEST_RESEARCH:
         return "reporter"
-    if decision == "HUMAN_REVIEW":
+    if decision == ChiefDecision.HUMAN_REVIEW:
         return "human_approval"
-
-    raise InvalidDecisionError(decision)   # 由 Pydantic 校验拦截
+    return END
 ```
 
-> 实际开发中需通过 Pydantic 对决策字段校验，避免大模型返回无法识别的决策值。
+> 实际开发中通过 Pydantic 对决策字段校验，避免大模型返回无法识别的决策值。
 
 ### 4.2 人工审核后的路由
 
 ```python
 def route_after_human_approval(state: NewsTaskState) -> str:
-    decision = state["human_decision"]   # APPROVE / REQUEST_EDIT / REQUEST_RESEARCH / TERMINATE
-
-    if decision == "APPROVE":
-        return "publisher"
-    if decision == "REQUEST_EDIT":
+    if state.human_decision == HumanDecision.APPROVE:
+        # 硬阻断（核查 FAILED / 专项检查 BLOCKED）时节点保持 HUMAN_REVIEW，直接结束
+        return "prepare_delivery" if state.task_status == TaskStatus.RUNNING else END
+    if state.human_decision == HumanDecision.REQUEST_EDIT:
         return "editor"
-    if decision == "REQUEST_RESEARCH":
+    if state.human_decision == HumanDecision.REQUEST_RESEARCH:
         return "reporter"
-    return "end"
+    return END
 ```
 
-### 4.3 用户确认后的路由
+### 4.3 交付确认
 
-```python
-def route_after_user_confirmation(state: NewsTaskState) -> str:
-    if not state["user_confirmation"]:
-        # 用户暂缓时不恢复图，任务保持 PENDING_PUBLISH，等待确认接口再次触发
-        return "wait_pending"
-    return "publish"
-```
+`PENDING_REVIEW` 是图执行结束后的静止状态，不再通过 `interrupt()` 恢复图。用户确认交付（`DELIVERED`）或终止（`TERMINATED`）由执行服务更新状态并写入事件，属于 C-05 的执行接口职责。
 
-### 4.4 退回计数与上限
+### 4.4 修改轮次与上限
 
-- 每次 `REQUEST_EDIT` / `REQUEST_RESEARCH` 使 `retry_count += 1`；
-- 超过 `MAX_RETRY`（建议 2，可配置）后，主编决策强制转为 `HUMAN_REVIEW`；
-- 任何稿件修改后必须**重新执行事实核查**，核查报告必须关联新版本；
+- 每次 `REQUEST_EDIT` / `REQUEST_RESEARCH` 使 `revision_round += 1`（主编退回和人工退回都计数）；
+- `revision_round >= max_revision_rounds` 后，主编的退回决策由代码强制转为 `HUMAN_REVIEW`；
+- 修改轮次与接口失败重试分开记录：`revision_round` 表示稿件修改轮次，`interface_retry_counts` 表示外部接口失败重试次数，二者不能混用；
+- 任何稿件修改后必须**重新执行事实核查和专项检查**，报告必须绑定新版本；
 - 所有退回必须携带结构化 `revision_request`，不得只有自然语言描述。
 
 ---
 
 ## 5. 工作流状态流转
 
+任务状态（`task_status`）只保留六个业务状态，执行阶段由 `current_stage` 单独表达：
+
 | 当前状态 | 触发事件 | 下一状态 |
 | --- | --- | --- |
-| `CREATED` | 用户创建任务 | `PLANNING` |
-| `PLANNING` | 采编计划生成 | `RESEARCHING` |
-| `RESEARCHING` | 记者完成资料搜集，开始撰写 | `WRITING` |
-| `WRITING` | 记者完成初稿 | `EDITING` |
-| `EDITING` | 编辑完成稿件 | `FACT_CHECKING` |
-| `FACT_CHECKING` | 核查完成 | `REVIEWING` |
-| `REVIEWING` | 主编审核通过 | `PENDING_PUBLISH` |
-| `REVIEWING` | 要求编辑修改 | `REVISION_REQUIRED → EDITING` |
-| `REVIEWING` | 要求补充资料 | `REVISION_REQUIRED → RESEARCHING` |
-| `REVIEWING` | 转人工审核 | `HUMAN_REVIEW` |
-| `HUMAN_REVIEW` | 人工通过 | `PENDING_PUBLISH` |
-| `HUMAN_REVIEW` | 人工要求修改 | `REVISION_REQUIRED → EDITING` |
-| `HUMAN_REVIEW` | 人工要求补充资料 | `REVISION_REQUIRED → RESEARCHING` |
-| `HUMAN_REVIEW` | 人工终止 | `CANCELLED` |
-| `PENDING_PUBLISH` | 用户确认并发布成功 | `PUBLISHED` |
-| `PENDING_PUBLISH` | 用户暂缓发布 | `PENDING_PUBLISH` |
+| `CREATED` | 用户创建任务 | `RUNNING`（阶段 `chief_planning`） |
+| `RUNNING` | 任一流水线节点完成 | `RUNNING`（阶段推进） |
+| `RUNNING` | 主编转人工 | `HUMAN_REVIEW` |
+| `RUNNING` | 交付材料准备完成 | `PENDING_REVIEW` |
+| `HUMAN_REVIEW` | 人工通过且无硬阻断 | `RUNNING → PENDING_REVIEW` |
+| `HUMAN_REVIEW` | 人工要求修改 / 补充资料 | `RUNNING`（阶段 `revision_required`） |
+| `HUMAN_REVIEW` | 人工终止 | `TERMINATED` |
+| `PENDING_REVIEW` | 用户确认交付 | `DELIVERED` |
+| `PENDING_REVIEW` | 用户终止 | `TERMINATED` |
 | 任意执行状态 | 不可恢复异常 | `FAILED` |
-| 任意未完成状态 | 用户取消 | `CANCELLED` |
+| 任意未完成状态 | 用户终止 | `TERMINATED` |
 
-> `REVISION_REQUIRED` 表示「已决定退回、目标节点尚未开始」的过渡状态；目标节点开始时进入 `EDITING` / `RESEARCHING`。
+> 阶段取值见 `WorkflowStage`：`created / chief_planning / research / editing / fact_check / special_check / chief_review / revision_required / human_review / prepare_delivery / pending_review / delivered / error / terminated`。
 > 状态流转由工作流代码统一控制，**不能完全依赖大语言模型自行修改**。
 
 ---
@@ -267,7 +256,8 @@ def route_after_user_confirmation(state: NewsTaskState) -> str:
 
 - 使用 LangGraph Checkpointer 保存每个节点执行后的状态，`thread_id = task_id`；
 - 任务失败或服务重启后，可从最近检查点恢复；
-- 停在 `human_approval` / 用户确认阶段的任务，必须通过人工接口恢复；
+- 停在 `human_approval` 阶段的任务，必须通过人工接口恢复；
+- `PENDING_REVIEW` 阶段不再恢复图，由执行服务更新交付 / 终止状态；
 - 恢复时不得重复执行已完成节点（幂等：来源按 URL 去重、稿件版本按 `(article_id, version)` 唯一）。
 
 ---
@@ -279,9 +269,9 @@ def route_after_user_confirmation(state: NewsTaskState) -> str:
 - 主编无法判断新闻内容是否符合报道要求。
 - 事实核查结果存在较大争议。
 - 新闻资料缺少可靠来源。
-- 系统多次执行失败（超过 `MAX_RETRY`）。
+- 系统达到修改轮次上限，需要人工接手。
 - 用户需要修改或终止新闻采编任务。
-- 最终稿件需要人工确认发布。
+- 交付材料准备完成后，用户需要复核并自行导出、提交。
 
 > 人工介入应作为工作流中的**正式节点或中断点**，而不是简单地在 Agent 提示词中要求模型等待。
 
@@ -311,15 +301,15 @@ def human_approval_node(state: NewsTaskState) -> dict:
 1. 每个业务节点应具有独立的输入输出结构。
 2. 各节点通过共享状态传递信息。
 3. 主编负责业务决策，LangGraph 负责流程调度。
-4. 修改稿件后应重新执行事实核查。
-5. 达到最大退回次数后应转入人工处理。
-6. 发布节点必须校验主编审核结果和用户确认状态。
+4. 修改稿件后应重新执行事实核查和专项检查，报告必须绑定当前版本。
+5. 修改轮次达到上限后应转入人工处理。
+6. 交付准备必须校验主编 / 人工审核结论、核查结果、专项检查结果与报告版本绑定；系统不执行对外发布。
 7. 对重要节点的执行结果和状态变化进行持久化记录。
 8. 图编译时设置 `recursion_limit`（建议 50）作为循环保护。
 
 ---
 
-## 9. 图编译参考
+## 9. 图编译参考（当前实现）
 
 ```python
 builder = StateGraph(NewsTaskState)
@@ -328,40 +318,39 @@ builder.add_node("chief_planning", chief_planning_node)
 builder.add_node("reporter", reporter_node)
 builder.add_node("editor", editor_node)
 builder.add_node("fact_checker", fact_checker_node)
+builder.add_node("special_check", special_check_node)
 builder.add_node("chief_review", chief_review_node)
-builder.add_node("publisher", publisher_node)
 builder.add_node("human_approval", human_approval_node)
-builder.add_node("publish", publish_node)
+builder.add_node("prepare_delivery", prepare_delivery_node)
 
 builder.add_edge(START, "chief_planning")
 builder.add_edge("chief_planning", "reporter")
 builder.add_edge("reporter", "editor")
 builder.add_edge("editor", "fact_checker")
-builder.add_edge("fact_checker", "chief_review")
+builder.add_edge("fact_checker", "special_check")
+builder.add_edge("special_check", "chief_review")
 builder.add_conditional_edges("chief_review", route_after_review, {
-    "publisher": "publisher",
+    "prepare_delivery": "prepare_delivery",
     "editor": "editor",
     "reporter": "reporter",
     "human_approval": "human_approval",
 })
 builder.add_conditional_edges("human_approval", route_after_human_approval, {
-    "publisher": "publisher",
+    "prepare_delivery": "prepare_delivery",
     "editor": "editor",
     "reporter": "reporter",
     "end": END,
 })
-builder.add_conditional_edges("publisher", route_after_user_confirmation, {
-    "publish": "publish",
-    "wait_pending": END,     # 仅记录待发布；确认接口通过检查点恢复后进入 publish
-})
-builder.add_edge("publish", END)
+builder.add_edge("prepare_delivery", END)
 
 graph = builder.compile(checkpointer=checkpointer)
 ```
 
+当前实现使用条件边处理各节点失败（`task_status=FAILED` 时直接 `END`），并用 `recursion_limit=50` 作为循环保护。`PENDING_REVIEW` 之后不再有图内节点。
+
 ---
 
-## 10. 第 3 周实现记录（2026-11-14）
+## 10. 实现记录
 
 ### 10.1 实现位置
 
@@ -370,8 +359,8 @@ graph = builder.compile(checkpointer=checkpointer)
 | 条件路由 | `backend/app/graph/routing.py` |
 | 节点实现 | `backend/app/graph/nodes.py` |
 | 图组装与运行封装 | `backend/app/graph/workflow.py` |
-| 主编 / 发布 Agent | `backend/app/agents/chief_editor.py`、`backend/app/agents/publisher.py` |
-| 模拟发布通道 | `backend/app/services/publish_service.py` |
+| 主编 / 专项检查 / 交付准备 | `backend/app/agents/chief_editor.py`、`special_check.py`、`delivery.py` |
+| 发布 Agent（B/D 交接保留） | `backend/app/agents/publisher.py`、`backend/app/services/publish_service.py` |
 
 ### 10.2 实际图结构
 
@@ -382,29 +371,29 @@ flowchart LR
     CP -->|失败| E([END])
     R --> ED[editor]
     ED --> FC[fact_checker]
-    FC --> CR[chief_review]
-    CR -->|APPROVE| P[publisher]
+    FC --> SC[special_check]
+    SC --> CR[chief_review]
+    CR -->|APPROVE| PD[prepare_delivery]
     CR -->|REQUEST_EDIT| ED
     CR -->|REQUEST_RESEARCH| R
     CR -->|HUMAN_REVIEW| H[human_approval]
-    H -->|APPROVE| P
+    H -->|APPROVE 且无硬阻断| PD
     H -->|REQUEST_EDIT| ED
     H -->|REQUEST_RESEARCH| R
     H -->|TERMINATE| E
-    P --> UC[user_confirmation]
-    UC -->|确认| PUB[publish]
-    UC -->|暂缓| E
-    PUB --> E
+    PD --> E
 ```
 
-### 10.3 与参考实现的差异
+### 10.3 关键实现说明
 
-1. **发布确认独立成节点**：`publisher` 只创建待发布记录，`user_confirmation` 负责 `interrupt()`，`publish` 负责调用发布通道；三者职责分开，恢复时不会重复执行 Publisher。
-2. **人工审核恢复值**：`{"decision": "...", "comments": "...", "revision_reason": "...", "revision_requirements": [...]}`，退回时校验原因与要求非空。
-3. **失败即终止**：任一 Agent 返回 `FAILED` 时，节点写入 `error`、`task_status=FAILED`、`current_stage=error`，路由直接到 `END`，不进入下一节点。
-4. **检查点**：使用 LangGraph `MemorySaver`，`thread_id = task_id`；进程重启后不保留，第 4 周替换为持久化 Checkpointer。
-5. **双重循环保护**：图编译设置 `recursion_limit=50`；退回次数达到 `MAX_REVISION_ROUNDS`（默认 2）时，主编节点把退回决策强制转为人审。
-6. **执行日志**：每个节点追加一条 `execution_logs`，记录 Agent、状态、起止时间、输出摘要或错误；日志随检查点一起保存。
+1. **专项检查在核查之后、主编之前**：`fact_checker` 完成即进入 `special_check`；专项检查报告绑定 `task_id + article_id + article_version`。
+2. **交付准备代替发布链**：`prepare_delivery` 生成 `DeliveryPackage`，任务进入 `PENDING_REVIEW`；系统不调用外部发布接口。
+3. **人工审核恢复值**：`{"decision": "...", "comments": "...", "revision_reason": "...", "revision_requirements": [...]}`，退回时校验原因与要求非空。
+4. **人工不能覆盖硬阻断**：核查 `FAILED` 或专项检查 `BLOCKED` 时，人工通过仍保持 `HUMAN_REVIEW` 并写入说明。
+5. **失败即终止**：任一 Agent 返回 `FAILED` 时，节点写入 `error`、`task_status=FAILED`、`current_stage=error`，路由直接到 `END`。
+6. **检查点**：使用 LangGraph `MemorySaver`，`thread_id = task_id`；进程重启后不保留，持久化 Checkpointer 仍待接入。
+7. **双重循环保护**：图编译设置 `recursion_limit=50`；`revision_round` 达到 `max_revision_rounds` 时，主编节点把退回决策强制转为人审。
+8. **执行日志**：每个节点追加一条 `execution_logs`，记录 Agent、状态、起止时间、输出摘要或错误；数据库存储按 `task_id + seq` 增量同步。
 
 ### 10.4 运行方式
 
@@ -414,12 +403,12 @@ from app.graph.workflow import NewsroomWorkflow
 
 workflow = NewsroomWorkflow()
 result = await workflow.run(NewsTaskState(task_id="TASK_001", topic="选题"))
-# result.interrupt 非空表示停在人工审核或发布确认
-result = await workflow.resume("TASK_001", {"confirm": True})
+# result.interrupt 非空表示停在人工审核；任务到达 PENDING_REVIEW 时图已结束
+result = await workflow.resume("TASK_001", {"decision": "APPROVE", "comments": "通过"})
 ```
 
-### 10.5 第 3 周验证结果
+### 10.5 验证结果
 
-- 自动化测试 120 项全部通过（新增 40 项：主编规划 / 审核、Publisher、路由、工作流分支与中断恢复）。
-- 真实 DeepSeek + Tavily 全链路冒烟：主编规划 5 个报道角度 → 记者 12 条来源 → 编辑版本 2 → 核查 8 条断言全部 `VERIFIED`（`PASSED`）→ 主编 `APPROVE` → 待发布 → 用户确认后 `PUBLISHED`（模拟发布地址）。
-- 尚未覆盖：真实发布通道、MySQL Checkpointer、中断后进程重启恢复、API 触发。
+- 2026-11-14（第 3 周）：自动化测试 120 项通过，真实 DeepSeek + Tavily 冒烟到达 `PUBLISHED`（旧发布链，已按分工文档废弃）。
+- 2026-11-22（第 4 周）：全量测试 140 项通过；正常链路到达 `PENDING_REVIEW` 并生成交付材料包；修改轮次、硬阻断、人工终止、失败节点等分支均有覆盖。
+- 尚未覆盖：执行接口触发（C-05）、接口失败重试独立计数（C-04）、进程重启恢复与重复启动防护（C-06）、真实专项检查规则。

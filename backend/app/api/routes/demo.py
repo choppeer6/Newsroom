@@ -61,11 +61,11 @@ async def submit_demo_review(
 
 
 @router.post("/tasks/{task_id}/confirm")
-async def submit_demo_confirmation(
+async def submit_demo_delivery(
     task_id: str,
     payload: DemoConfirmRequest,
     request: Request,
     service: DemoService = Depends(get_demo_service),
 ) -> Any:
-    service.submit_confirmation(task_id, confirm=payload.confirm)
+    service.submit_delivery(task_id, confirm=payload.confirm)
     return ok(request, {"task_id": task_id, "phase": "running"})

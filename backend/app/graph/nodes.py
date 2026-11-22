@@ -13,30 +13,39 @@ from app.agents.chief_editor import ChiefPlanningAgent, ChiefReviewAgent
 from app.agents.contracts import (
     ChiefPlanningInput,
     ChiefReviewInput,
+    DeliveryPreparationInput,
     EditorInput,
     FactCheckerInput,
-    PublisherInput,
     ReporterInput,
+    SpecialCheckInput,
 )
+from app.agents.delivery import DeliveryPreparationAgent
 from app.agents.editor import EditorAgent
 from app.agents.fact_checker import FactCheckerAgent
-from app.agents.publisher import PublisherAgent
 from app.agents.reporter import ReporterAgent
+from app.agents.special_check import SpecialCheckAgent
 from app.core.llm import LLMClient, OpenAICompatibleClient
 from app.core.utils import generate_id, utc_now
 from app.graph.state import NewsTaskState
 from app.schemas.base import StrictModel
-from app.schemas.domain import ErrorInfo, ExecutionLogEntry, FactCheckReport, RevisionRequest
+from app.schemas.domain import (
+    ErrorInfo,
+    ExecutionLogEntry,
+    FactCheckReport,
+    RevisionRequest,
+    SpecialCheckReport,
+)
 from app.schemas.enums import (
     AgentName,
     AgentStatus,
     ChiefDecision,
+    FactCheckOverallResult,
     HumanDecision,
     RevisionTarget,
+    SpecialCheckResult,
     TaskStatus,
     WorkflowStage,
 )
-from app.services.publish_service import PublishService
 from app.tools.search import SearchTool, TavilySearchTool
 
 
@@ -46,15 +55,15 @@ class WorkflowAgents:
     reporter: ReporterAgent
     editor: EditorAgent
     fact_checker: FactCheckerAgent
+    special_checker: SpecialCheckAgent
     review: ChiefReviewAgent
-    publisher: PublisherAgent
+    delivery_preparer: DeliveryPreparationAgent
 
 
 def create_default_agents(
     *,
     llm: LLMClient | None = None,
     search: SearchTool | None = None,
-    publish_service: PublishService | None = None,
 ) -> WorkflowAgents:
     client = llm or OpenAICompatibleClient()
     search_tool = search or TavilySearchTool()
@@ -63,8 +72,9 @@ def create_default_agents(
         reporter=ReporterAgent(llm=client, search=search_tool),
         editor=EditorAgent(llm=client),
         fact_checker=FactCheckerAgent(llm=client, search=search_tool),
+        special_checker=SpecialCheckAgent(),
         review=ChiefReviewAgent(llm=client),
-        publisher=PublisherAgent(publish_service=publish_service),
+        delivery_preparer=DeliveryPreparationAgent(),
     )
 
 
@@ -84,10 +94,6 @@ class HumanDecisionPayload(StrictModel):
                     "revision_requirements is required when requesting a revision"
                 )
         return self
-
-
-class UserConfirmationPayload(StrictModel):
-    confirm: bool
 
 
 def _log(
@@ -128,7 +134,7 @@ def _invalid_state(message: str) -> ErrorInfo:
     return ErrorInfo(code="WORKFLOW_STATE_INVALID", message=message)
 
 
-def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
+def make_nodes(agents: WorkflowAgents, *, max_revision_rounds: int) -> dict[str, Any]:
     async def chief_planning(state: NewsTaskState) -> dict[str, Any]:
         started = utc_now()
         output = await agents.planning.run(
@@ -151,7 +157,7 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
             return _failed(state, output.error, logs)
         return {
             "editorial_plan": output.editorial_plan,
-            "task_status": TaskStatus.RESEARCHING,
+            "task_status": TaskStatus.RUNNING,
             "current_stage": WorkflowStage.RESEARCH,
             "execution_logs": logs,
             "updated_at": utc_now(),
@@ -193,8 +199,10 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
             "edited_article": None,
             "editing_report": None,
             "fact_check_report": None,
+            "special_check_report": None,
+            "delivery_package": None,
             "revision_request": None,
-            "task_status": TaskStatus.EDITING,
+            "task_status": TaskStatus.RUNNING,
             "current_stage": WorkflowStage.EDITING,
             "execution_logs": logs,
             "updated_at": utc_now(),
@@ -247,8 +255,10 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
             "article_id": state.article_id or generate_id("ART"),
             "article_version": output.version,
             "fact_check_report": None,
+            "special_check_report": None,
+            "delivery_package": None,
             "revision_request": None,
-            "task_status": TaskStatus.FACT_CHECKING,
+            "task_status": TaskStatus.RUNNING,
             "current_stage": WorkflowStage.FACT_CHECK,
             "execution_logs": logs,
             "updated_at": utc_now(),
@@ -306,7 +316,63 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
         )
         return {
             "fact_check_report": report,
-            "task_status": TaskStatus.REVIEWING,
+            "task_status": TaskStatus.RUNNING,
+            "current_stage": WorkflowStage.SPECIAL_CHECK,
+            "execution_logs": logs,
+            "updated_at": utc_now(),
+        }
+
+    async def special_check(state: NewsTaskState) -> dict[str, Any]:
+        started = utc_now()
+        if (
+            state.edited_article is None
+            or state.article_id is None
+            or state.article_version is None
+            or state.fact_check_report is None
+        ):
+            logs = _log(
+                state,
+                AgentName.SPECIAL_CHECKER,
+                AgentStatus.FAILED,
+                started,
+                error_message="专项检查所需状态不完整",
+            )
+            return _failed(state, _invalid_state("专项检查所需状态不完整"), logs)
+
+        output = await agents.special_checker.run(
+            SpecialCheckInput(
+                task_id=state.task_id,
+                article_id=state.article_id,
+                article=state.edited_article,
+                article_version=state.article_version,
+                fact_check_report=state.fact_check_report,
+                sources=state.research_sources,
+            )
+        )
+        logs = _log(
+            state,
+            AgentName.SPECIAL_CHECKER,
+            output.status,
+            started,
+            output_summary=output.finding.result.value if output.finding else None,
+            error_message=output.error.message if output.error else None,
+        )
+        if output.status == AgentStatus.FAILED:
+            return _failed(state, output.error, logs)
+
+        finding = output.finding
+        report = SpecialCheckReport(
+            report_id=generate_id("SC"),
+            task_id=state.task_id,
+            article_id=state.article_id,
+            article_version=state.article_version,
+            result=finding.result,
+            summary=finding.summary,
+            issues=finding.issues,
+        )
+        return {
+            "special_check_report": report,
+            "task_status": TaskStatus.RUNNING,
             "current_stage": WorkflowStage.CHIEF_REVIEW,
             "execution_logs": logs,
             "updated_at": utc_now(),
@@ -320,6 +386,7 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
             or state.article_id is None
             or state.article_version is None
             or state.fact_check_report is None
+            or state.special_check_report is None
         ):
             logs = _log(
                 state,
@@ -342,8 +409,9 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
                 article_id=state.article_id,
                 article_version=state.article_version,
                 fact_check_report=state.fact_check_report,
-                retry_count=state.retry_count,
-                max_retry=max_retry,
+                special_check_report=state.special_check_report,
+                revision_round=state.revision_round,
+                max_revision_rounds=max_revision_rounds,
             )
         )
         logs = _log(
@@ -366,14 +434,18 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
         }
         if output.chief_decision == ChiefDecision.HUMAN_REVIEW:
             update["task_status"] = TaskStatus.HUMAN_REVIEW
-            update["current_stage"] = WorkflowStage.HUMAN_APPROVAL
+            update["current_stage"] = WorkflowStage.HUMAN_REVIEW
         elif output.chief_decision in {
             ChiefDecision.REQUEST_EDIT,
             ChiefDecision.REQUEST_RESEARCH,
         }:
-            update["retry_count"] = state.retry_count + 1
-            update["task_status"] = TaskStatus.REVISION_REQUIRED
+            update["revision_round"] = state.revision_round + 1
+            update["task_status"] = TaskStatus.RUNNING
             update["current_stage"] = WorkflowStage.REVISION_REQUIRED
+            update["delivery_package"] = None
+        else:
+            update["task_status"] = TaskStatus.RUNNING
+            update["current_stage"] = WorkflowStage.PREPARE_DELIVERY
         return update
 
     async def human_approval(state: NewsTaskState) -> dict[str, Any]:
@@ -387,9 +459,15 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
                     state.chief_decision.value if state.chief_decision else None
                 ),
                 "review_comments": state.review_comments,
+                "revision_round": state.revision_round,
                 "fact_check_overall": (
                     state.fact_check_report.overall_result.value
                     if state.fact_check_report
+                    else None
+                ),
+                "special_check_result": (
+                    state.special_check_report.result.value
+                    if state.special_check_report
                     else None
                 ),
             }
@@ -403,12 +481,34 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
             update["review_comments"] = payload.comments
 
         if payload.decision == HumanDecision.TERMINATE:
-            update["task_status"] = TaskStatus.CANCELLED
-            update["current_stage"] = WorkflowStage.CANCELLED
+            update["task_status"] = TaskStatus.TERMINATED
+            update["current_stage"] = WorkflowStage.TERMINATED
             return update
 
         if payload.decision == HumanDecision.APPROVE:
+            blockers: list[str] = []
+            if (
+                state.fact_check_report is not None
+                and state.fact_check_report.overall_result
+                == FactCheckOverallResult.FAILED
+            ):
+                blockers.append("事实核查未通过")
+            if (
+                state.special_check_report is not None
+                and state.special_check_report.result == SpecialCheckResult.BLOCKED
+            ):
+                blockers.append("专项检查存在阻断项")
+            if blockers:
+                update["task_status"] = TaskStatus.HUMAN_REVIEW
+                update["current_stage"] = WorkflowStage.HUMAN_REVIEW
+                update["review_comments"] = (
+                    f"{update.get('review_comments') or state.review_comments or ''}"
+                    f"（人工不能覆盖：{'；'.join(blockers)}，无法准备交付）"
+                )
+                return update
             update["revision_request"] = None
+            update["task_status"] = TaskStatus.RUNNING
+            update["current_stage"] = WorkflowStage.PREPARE_DELIVERY
             return update
 
         target = (
@@ -421,125 +521,72 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
             reason=payload.revision_reason or "",
             requirements=payload.revision_requirements,
         )
-        update["retry_count"] = state.retry_count + 1
-        update["task_status"] = TaskStatus.REVISION_REQUIRED
+        update["revision_round"] = state.revision_round + 1
+        update["task_status"] = TaskStatus.RUNNING
         update["current_stage"] = WorkflowStage.REVISION_REQUIRED
+        update["delivery_package"] = None
         return update
 
-    async def publisher(state: NewsTaskState) -> dict[str, Any]:
+    async def prepare_delivery(state: NewsTaskState) -> dict[str, Any]:
         started = utc_now()
         if (
             state.edited_article is None
             or state.article_id is None
             or state.article_version is None
             or state.fact_check_report is None
+            or state.special_check_report is None
         ):
             logs = _log(
                 state,
-                AgentName.PUBLISHER,
+                AgentName.DELIVERY_PREPARER,
                 AgentStatus.FAILED,
                 started,
-                error_message="发布所需状态不完整",
+                error_message="交付材料所需状态不完整",
             )
-            return _failed(state, _invalid_state("发布所需状态不完整"), logs)
+            return _failed(state, _invalid_state("交付材料所需状态不完整"), logs)
 
-        output = await agents.publisher.run(
-            PublisherInput(
+        try:
+            payload = DeliveryPreparationInput(
                 task_id=state.task_id,
                 article_id=state.article_id,
                 article=state.edited_article,
                 article_version=state.article_version,
-                chief_decision=ChiefDecision.APPROVE,
-                fact_check_status=state.fact_check_report.overall_result,
-                user_confirmation=False,
+                fact_check_report=state.fact_check_report,
+                special_check_report=state.special_check_report,
+                sources=state.research_sources,
             )
-        )
+        except ValueError as exc:
+            logs = _log(
+                state,
+                AgentName.DELIVERY_PREPARER,
+                AgentStatus.FAILED,
+                started,
+                error_message=str(exc),
+            )
+            return _failed(
+                state,
+                ErrorInfo(
+                    code="DELIVERY_PRECONDITION_FAILED",
+                    message=f"交付前置条件未满足：{exc}",
+                ),
+                logs,
+            )
+
+        output = await agents.delivery_preparer.run(payload)
         logs = _log(
             state,
-            AgentName.PUBLISHER,
+            AgentName.DELIVERY_PREPARER,
             output.status,
             started,
-            output_summary="待发布" if output.publication else None,
+            output_summary="交付材料已准备" if output.package else None,
             error_message=output.error.message if output.error else None,
         )
         if output.status == AgentStatus.FAILED:
             return _failed(state, output.error, logs)
         return {
-            "publication": output.publication,
-            "task_status": TaskStatus.PENDING_PUBLISH,
-            "current_stage": WorkflowStage.PENDING_PUBLISH,
-            "execution_logs": logs,
-            "updated_at": utc_now(),
-        }
-
-    async def user_confirmation(state: NewsTaskState) -> dict[str, Any]:
-        answer = interrupt(
-            {
-                "task_id": state.task_id,
-                "article_id": state.article_id,
-                "article_version": state.article_version,
-                "publication": (
-                    state.publication.model_dump(mode="json")
-                    if state.publication
-                    else None
-                ),
-            }
-        )
-        payload = UserConfirmationPayload.model_validate(answer)
-        return {"user_confirmation": payload.confirm, "updated_at": utc_now()}
-
-    async def publish(state: NewsTaskState) -> dict[str, Any]:
-        started = utc_now()
-        if (
-            state.edited_article is None
-            or state.article_id is None
-            or state.article_version is None
-            or state.fact_check_report is None
-        ):
-            logs = _log(
-                state,
-                AgentName.PUBLISHER,
-                AgentStatus.FAILED,
-                started,
-                error_message="发布所需状态不完整",
-            )
-            return _failed(state, _invalid_state("发布所需状态不完整"), logs)
-
-        output = await agents.publisher.run(
-            PublisherInput(
-                task_id=state.task_id,
-                article_id=state.article_id,
-                article=state.edited_article,
-                article_version=state.article_version,
-                chief_decision=ChiefDecision.APPROVE,
-                fact_check_status=state.fact_check_report.overall_result,
-                user_confirmation=True,
-            )
-        )
-        logs = _log(
-            state,
-            AgentName.PUBLISHER,
-            output.status,
-            started,
-            output_summary=(
-                output.publication.status.value if output.publication else None
-            ),
-            error_message=output.error.message if output.error else None,
-        )
-        if output.status == AgentStatus.FAILED:
-            return {
-                "publication": output.publication,
-                "task_status": TaskStatus.PENDING_PUBLISH,
-                "current_stage": WorkflowStage.PENDING_PUBLISH,
-                "error": output.error,
-                "execution_logs": logs,
-                "updated_at": utc_now(),
-            }
-        return {
-            "publication": output.publication,
-            "task_status": TaskStatus.PUBLISHED,
-            "current_stage": WorkflowStage.PUBLISHED,
-            "error": None,
+            "delivery_package": output.package,
+            "task_status": TaskStatus.PENDING_REVIEW,
+            "current_stage": WorkflowStage.PENDING_REVIEW,
             "execution_logs": logs,
             "updated_at": utc_now(),
         }
@@ -549,9 +596,8 @@ def make_nodes(agents: WorkflowAgents, *, max_retry: int) -> dict[str, Any]:
         "reporter": reporter,
         "editor": editor,
         "fact_checker": fact_checker,
+        "special_check": special_check,
         "chief_review": chief_review,
         "human_approval": human_approval,
-        "publisher": publisher,
-        "user_confirmation": user_confirmation,
-        "publish": publish,
+        "prepare_delivery": prepare_delivery,
     }

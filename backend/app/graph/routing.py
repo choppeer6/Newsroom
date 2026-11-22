@@ -25,6 +25,10 @@ def route_after_editor(state: NewsTaskState) -> str:
 
 
 def route_after_fact_checker(state: NewsTaskState) -> str:
+    return END if _failed(state) else "special_check"
+
+
+def route_after_special_check(state: NewsTaskState) -> str:
     return END if _failed(state) else "chief_review"
 
 
@@ -33,7 +37,7 @@ def route_after_review(state: NewsTaskState) -> str:
         return END
     decision = state.chief_decision
     if decision == ChiefDecision.APPROVE:
-        return "publisher"
+        return "prepare_delivery"
     if decision == ChiefDecision.REQUEST_EDIT:
         return "editor"
     if decision == ChiefDecision.REQUEST_RESEARCH:
@@ -48,17 +52,13 @@ def route_after_human_approval(state: NewsTaskState) -> str:
         return END
     decision = state.human_decision
     if decision == HumanDecision.APPROVE:
-        return "publisher"
+        return (
+            "prepare_delivery"
+            if state.task_status == TaskStatus.RUNNING
+            else END
+        )
     if decision == HumanDecision.REQUEST_EDIT:
         return "editor"
     if decision == HumanDecision.REQUEST_RESEARCH:
         return "reporter"
     return END
-
-
-def route_after_publisher(state: NewsTaskState) -> str:
-    return END if _failed(state) else "user_confirmation"
-
-
-def route_after_confirmation(state: NewsTaskState) -> str:
-    return "publish" if state.user_confirmation else END

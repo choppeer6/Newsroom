@@ -42,11 +42,15 @@ def build_workflow(
     *,
     agents: WorkflowAgents | None = None,
     checkpointer: MemorySaver | None = None,
-    max_retry: int | None = None,
+    max_revision_rounds: int | None = None,
 ):
-    retry_cap = get_settings().max_revision_rounds if max_retry is None else max_retry
+    revision_cap = (
+        get_settings().max_revision_rounds
+        if max_revision_rounds is None
+        else max_revision_rounds
+    )
     resolved_agents = agents or create_default_agents()
-    nodes = make_nodes(resolved_agents, max_retry=retry_cap)
+    nodes = make_nodes(resolved_agents, max_revision_rounds=revision_cap)
 
     builder = StateGraph(NewsTaskState)
     for name, node in nodes.items():
@@ -71,13 +75,18 @@ def build_workflow(
     builder.add_conditional_edges(
         "fact_checker",
         routing.route_after_fact_checker,
+        {"special_check": "special_check", routing.END: END},
+    )
+    builder.add_conditional_edges(
+        "special_check",
+        routing.route_after_special_check,
         {"chief_review": "chief_review", routing.END: END},
     )
     builder.add_conditional_edges(
         "chief_review",
         routing.route_after_review,
         {
-            "publisher": "publisher",
+            "prepare_delivery": "prepare_delivery",
             "editor": "editor",
             "reporter": "reporter",
             "human_approval": "human_approval",
@@ -88,23 +97,13 @@ def build_workflow(
         "human_approval",
         routing.route_after_human_approval,
         {
-            "publisher": "publisher",
+            "prepare_delivery": "prepare_delivery",
             "editor": "editor",
             "reporter": "reporter",
             routing.END: END,
         },
     )
-    builder.add_conditional_edges(
-        "publisher",
-        routing.route_after_publisher,
-        {"user_confirmation": "user_confirmation", routing.END: END},
-    )
-    builder.add_conditional_edges(
-        "user_confirmation",
-        routing.route_after_confirmation,
-        {"publish": "publish", routing.END: END},
-    )
-    builder.add_edge("publish", END)
+    builder.add_edge("prepare_delivery", END)
 
     return builder.compile(checkpointer=checkpointer or default_checkpointer())
 
@@ -139,15 +138,17 @@ class NewsroomWorkflow:
         *,
         agents: WorkflowAgents | None = None,
         checkpointer: MemorySaver | None = None,
-        max_retry: int | None = None,
+        max_revision_rounds: int | None = None,
     ) -> None:
-        self.max_retry = (
-            get_settings().max_revision_rounds if max_retry is None else max_retry
+        self.max_revision_rounds = (
+            get_settings().max_revision_rounds
+            if max_revision_rounds is None
+            else max_revision_rounds
         )
         self._graph = build_workflow(
             agents=agents,
             checkpointer=checkpointer,
-            max_retry=self.max_retry,
+            max_revision_rounds=self.max_revision_rounds,
         )
 
     @property

@@ -52,9 +52,11 @@ def test_create_and_get_task(client):
     assert data["current_stage"] == "created"
     assert data["description"] == SAMPLE_TASK["description"]
     assert data["requirements"]["focus"] == SAMPLE_TASK["requirements"]["focus"]
-    assert data["retry_count"] == 0
+    assert data["paused"] is False
+    assert data["revision_round"] == 0
     assert data["latest_fact_check"] is None
-    assert data["publication_status"] is None
+    assert data["latest_special_check"] is None
+    assert data["delivery"] is None
     assert data["error"] is None
 
 
@@ -120,8 +122,8 @@ def test_cancel_task_and_reject_repeat(client):
     response = client.post(f"/api/news/tasks/{task_id}/cancel")
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["status"] == "CANCELLED"
-    assert data["current_stage"] == "cancelled"
+    assert data["status"] == "TERMINATED"
+    assert data["current_stage"] == "terminated"
 
     repeat = client.post(f"/api/news/tasks/{task_id}/cancel")
     assert repeat.status_code == 409
@@ -180,5 +182,5 @@ def test_service_generates_news_task_state():
     assert created.task_id.startswith("TASK_")
     assert fetched.task_status == TaskStatus.CREATED
     assert fetched.current_stage == WorkflowStage.CREATED
-    assert fetched.retry_count == 0
+    assert fetched.revision_round == 0
     assert fetched.requirements.target_length == 1500

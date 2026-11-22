@@ -44,9 +44,9 @@ class TaskRecord(Base):
             description=state.description,
             status=state.task_status.value,
             stage=state.current_stage.value,
-            paused=False,
-            revision_round=state.retry_count,
-            interface_retry_counts={},
+            paused=state.paused,
+            revision_round=state.revision_round,
+            interface_retry_counts=state.interface_retry_counts,
             state_json=state.model_dump(mode="json"),
             error_json=state.error.model_dump(mode="json") if state.error else None,
             created_at=state.created_at,
@@ -58,7 +58,9 @@ class TaskRecord(Base):
         self.description = state.description
         self.status = state.task_status.value
         self.stage = state.current_stage.value
-        self.revision_round = state.retry_count
+        self.paused = state.paused
+        self.revision_round = state.revision_round
+        self.interface_retry_counts = state.interface_retry_counts
         self.state_json = state.model_dump(mode="json")
         self.error_json = state.error.model_dump(mode="json") if state.error else None
         self.updated_at = state.updated_at

@@ -397,3 +397,43 @@ flowchart TD
 - 本轮只落 C 的任务与执行事件，没有改任务状态枚举和工作流末段；
 - 稿件版本、来源/核查/专项检查报告仍由 B、D 各自建表；
 - 下一阶段：按分工文档将任务状态改为“运行、待人工处理、待复核、已交付、失败、终止”，并把发布链换成专项检查、主编决策与预发布准备链。
+
+## 14. C 状态机与交付链改造（2026-11-22）
+
+**背景**
+
+按分工文档与课程业务口径，系统不对外发布新闻：主编审核通过后只需准备交付材料，由用户复核、导出并自行投稿。第 3 周的发布链（Publisher → 发布确认）与此不符，需要改为「专项检查 → 主编决策 → 预发布准备 → 待复核 → 已交付」。
+
+**已完成**
+
+- 任务状态改为六个业务状态：`RUNNING`（运行）、`HUMAN_REVIEW`（待人工处理）、`PENDING_REVIEW`（待复核）、`DELIVERED`（已交付）、`FAILED`（失败）、`TERMINATED`（终止）；执行阶段由 `WorkflowStage` 单独记录，不再混入业务状态；
+- 工作流新增两个节点（当前为确定性占位，D 模块后续替换）：
+  - `special_check`：事实核查之后执行，报告绑定 `task_id + article_id + article_version`，结论 `PASSED / WARNING / BLOCKED`；
+  - `prepare_delivery`：主编 `APPROVE` 后执行，校验前置条件并生成 `DeliveryPackage`，任务进入 `PENDING_REVIEW`；
+- 主编审核新增硬约束：事实核查非 `PASSED` 或专项检查 `BLOCKED` 时 `APPROVE` 降级为 `HUMAN_REVIEW`；`WARNING` 保留 `APPROVE` 但注明提示项；`revision_round` 达到 `max_revision_rounds` 强制转人工；
+- 人工审核不能覆盖 `FAILED` / `BLOCKED` 结论：此时批准无效，任务保持 `HUMAN_REVIEW`；人工仍可终止任务或退回修改；
+- 修改轮次 `revision_round` 与接口失败重试 `interface_retry_counts` 分离，前者只统计稿件退回次数；
+- 取消任务与人工终止统一落到 `TERMINATED`；已交付或已终止任务不可再取消（409）；
+- 交付确认：`PENDING_REVIEW` 下确认交付置为 `DELIVERED`，暂不交付保持 `PENDING_REVIEW`；非待复核状态调用交付接口返回 409；
+- 演示控制台同步新阶段（专项检查、主编审核、待复核、已交付）、修改轮次与交付卡片；
+- `publisher` / `publish_service` 退出工作流，代码与契约保留为 B/D 交接桩。
+
+**文档同步**
+
+- `docs/04-workflow/workflow-design.md`：节点、路由、状态迁移与当前图代码（V0.3）；
+- `docs/05-data-design/state-schema.md`：字段、领域模型与不变式（V0.3）；
+- `docs/06-api/api-specification.md`：状态口径、交付接口、演示接口与实现状态；
+- `docs/03-agent-design/agent-specification.md`：Agent 关系、审核决策与节点契约（V0.4）；
+- `docs/07-prompts/prompt-design.md`：主编审核 Prompt 新增专项检查与修改轮次变量，交付链无 Prompt。
+
+**验证结果**
+
+- 后端全量测试 `140 passed`；
+- 覆盖：状态不变式、路由、正常工作流（到 `PENDING_REVIEW` 并生成交付包）、专项检查阻断、人工批准/阻断覆盖/终止、修改轮次上限、演示接口交付确认与幂等冲突。
+
+**当前边界与后续**
+
+- C-05 执行服务与接口（execute / pause / resume / decision / events）尚未开始，演示接口暂作为联调入口；
+- C-04 接口失败重试计数与展示待接入执行服务；
+- C-06 重启恢复、重复启动防护（执行锁已就绪）与手工编辑后的版本失效待实现；
+- 专项检查与预发布准备当前为占位实现，待 D 模块交付真实逻辑后替换，契约保持不变。

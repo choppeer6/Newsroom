@@ -26,7 +26,7 @@ def test_sql_store_persists_task_and_events(tmp_path):
             description="验证任务与执行事件落库",
             requirements=TaskRequirements(),
         )
-        state.task_status = TaskStatus.PLANNING
+        state.task_status = TaskStatus.RUNNING
         state.current_stage = WorkflowStage.CHIEF_PLANNING
         state.execution_logs.append(
             ExecutionLogEntry(
@@ -51,7 +51,7 @@ def test_sql_store_persists_task_and_events(tmp_path):
 
     assert loaded is not None
     assert loaded.task_id == task_id
-    assert loaded.task_status == TaskStatus.PLANNING
+    assert loaded.task_status == TaskStatus.RUNNING
     assert loaded.current_stage == WorkflowStage.CHIEF_PLANNING
     assert [event.log_id for event in events] == ["LOG_0001"]
     assert events[0].output_summary == "采编计划已生成"

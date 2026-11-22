@@ -13,6 +13,8 @@ from app.schemas.enums import (
     FactCheckOverallResult,
     PublicationStatus,
     RevisionTarget,
+    SpecialCheckResult,
+    SpecialCheckSeverity,
 )
 
 URL_PATTERN = r"^https?://\S+$"
@@ -106,6 +108,50 @@ class FactCheckReport(FactCheckFinding):
     article_id: str = Field(min_length=1)
     article_version: int = Field(ge=1)
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class SpecialCheckIssue(StrictModel):
+    category: str = Field(min_length=1)
+    severity: SpecialCheckSeverity
+    description: str = Field(min_length=1)
+    suggestion: str | None = None
+
+
+class SpecialCheckFinding(StrictModel):
+    result: SpecialCheckResult
+    summary: str = Field(min_length=1)
+    issues: list[SpecialCheckIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _result_matches_issues(self) -> "SpecialCheckFinding":
+        blocking = any(
+            issue.severity == SpecialCheckSeverity.BLOCKING for issue in self.issues
+        )
+        if self.result == SpecialCheckResult.BLOCKED and not blocking:
+            raise ValueError("BLOCKED requires at least one BLOCKING issue")
+        if self.result == SpecialCheckResult.PASSED and blocking:
+            raise ValueError("PASSED must not contain BLOCKING issues")
+        return self
+
+
+class SpecialCheckReport(SpecialCheckFinding):
+    report_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    article_id: str = Field(min_length=1)
+    article_version: int = Field(ge=1)
+    checked_at: datetime = Field(default_factory=utc_now)
+
+
+class DeliveryPackage(StrictModel):
+    package_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    article_id: str = Field(min_length=1)
+    article_version: int = Field(ge=1)
+    fact_check_report_id: str = Field(min_length=1)
+    special_check_report_id: str = Field(min_length=1)
+    source_ids: list[str] = Field(default_factory=list)
+    prepared_at: datetime = Field(default_factory=utc_now)
+    note: str | None = None
 
 
 class RevisionRequest(StrictModel):

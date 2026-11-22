@@ -35,9 +35,12 @@
 | Article | 新闻稿件 | `articles` |
 | ArticleVersion | 新闻稿件版本 | `article_versions` |
 | FactCheckReport | 事实核查报告 | `fact_check_reports` |
+| SpecialCheckReport | 专项检查报告 | `special_check_reports` |
+| DeliveryPackage | 交付材料包（预发布准备结果） | `delivery_packages` |
 | ReviewRecord | 主编 / 人工审核记录 | `review_records` |
 | AgentExecutionLog | Agent 执行日志 | `agent_execution_logs` |
-| Publication | 新闻发布记录 | `publications` |
+
+> Publication（对外发布记录）已按分工文档移除：系统只准备交付材料并进入「待复核」，由用户自行导出与提交。下方 ER 图保留旧发布实体仅作历史参考，实际以本表为准。
 
 主要关系：
 
@@ -142,22 +145,26 @@ erDiagram
 | `editing_report` | dict | 编辑说明 | 编辑 |
 | `article_id` | str | 稿件编号 | 工作流 / 编辑 |
 | `article_version` | int | 当前稿件版本号 | 工作流 / 编辑 |
-| `fact_check_report` | dict | 事实核查报告 | 事实核查 |
+| `fact_check_report` | dict | 事实核查报告（绑定稿件版本） | 事实核查 |
+| `special_check_report` | dict | 专项检查报告（绑定任务与稿件版本） | 专项检查 |
 | `chief_decision` | str | 主编审核决策 | 主编 |
 | `review_comments` | str | 审核意见 | 主编 / 人工 |
 | `revision_request` | dict | 修改或补充资料要求 | 主编 / 人工 |
 | `current_stage` | str | 当前执行阶段（节点内阶段） | 工作流 |
-| `task_status` | str | 当前任务状态 | 工作流 |
-| `retry_count` | int | 重试或退回计数 | 工作流 |
-| `user_confirmation` | bool | 用户是否确认发布 | 用户接口 |
+| `task_status` | str | 当前任务状态（六个业务状态） | 工作流 |
+| `paused` | bool | 任务是否暂停 | 执行服务 |
+| `revision_round` | int | 稿件修改轮次 | 工作流 |
+| `interface_retry_counts` | dict | 外部接口失败重试计数（按接口） | 服务层 |
 | `human_decision` | str \| None | 人工审核决定 | 人工接口 |
 | `execution_logs` | list | 执行记录 | 各节点 |
-| `publication` | dict | 发布信息 | 审核发布 |
+| `delivery_package` | dict | 交付材料包（`PENDING_REVIEW` / `DELIVERED` 必需） | 预发布准备 |
 | `error` | dict \| None | 错误信息 | 工作流 |
 | `created_at` | datetime | 任务创建时间 | 创建任务 |
 | `updated_at` | datetime | 最近更新时间 | 服务层 |
 
-### 3.3 TypedDict 定义（V0.1 基线）
+### 3.3 TypedDict 定义（V0.1 基线，已被 V0.3 取代）
+
+> 以下为第 1 周基线，保留用于对照。当前实现以 3.2 字段表与 `backend/app/graph/state.py` 为准。
 
 ```python
 from typing import TypedDict, Optional
@@ -181,8 +188,9 @@ class NewsTaskState(TypedDict, total=False):
     # 编辑结果
     edited_article: dict
 
-    # 事实核查结果
+    # 核查与专项检查
     fact_check_report: dict
+    special_check_report: dict
 
     # 主编审核结果
     chief_decision: str
@@ -194,12 +202,13 @@ class NewsTaskState(TypedDict, total=False):
     # 工作流管理
     current_stage: str
     task_status: str
-    retry_count: int
+    paused: bool
+    revision_round: int
+    interface_retry_counts: dict
 
-    # 人工与发布
-    user_confirmation: bool
+    # 人工与交付
     human_decision: Optional[str]
-    publication: dict
+    delivery_package: dict
 
     # 执行记录
     execution_logs: list
@@ -210,7 +219,7 @@ class NewsTaskState(TypedDict, total=False):
 
 > 实际项目中，应对 `editorial_plan`、`draft_article`、`edited_article`、`fact_check_report` 等字段建立独立的 Pydantic `BaseModel`，避免使用过多未经约束的字典。
 
-> **V0.2 实现说明**：`backend/app/graph/state.py` 中的 `NewsTaskState` 采用 Pydantic `BaseModel`，以便 FastAPI 序列化、节点输入校验和后续 LangGraph 集成；字段集合以上表为准，嵌套字段均使用独立 Pydantic 模型。
+> **V0.2 / V0.3 实现说明**：`backend/app/graph/state.py` 中的 `NewsTaskState` 采用 Pydantic `BaseModel`，以便 FastAPI 序列化、节点输入校验和后续 LangGraph 集成；字段集合以 3.2 表为准，嵌套字段均使用独立 Pydantic 模型。
 
 ### 3.4 Pydantic 模型（建议）
 
@@ -268,32 +277,61 @@ class RevisionRequest(BaseModel):
     related_claims: list[str] = []
 
 
-class Publication(BaseModel):
-    status: Literal["PENDING_PUBLISH", "PUBLISHED", "FAILED"]
+class SpecialCheckIssue(BaseModel):
+    category: str
+    severity: Literal["INFO", "WARNING", "BLOCKING"]
+    description: str
+    suggestion: str | None = None
+
+
+class SpecialCheckFinding(BaseModel):
+    result: Literal["PASSED", "WARNING", "BLOCKED"]
+    summary: str
+    issues: list[SpecialCheckIssue] = []
+
+
+class SpecialCheckReport(SpecialCheckFinding):
+    report_id: str
+    task_id: str
     article_id: str
-    published_at: datetime | None = None
-    external_url: str | None = None
-    message: str | None = None
+    article_version: int
+    checked_at: datetime
+
+
+class DeliveryPackage(BaseModel):
+    package_id: str
+    task_id: str
+    article_id: str
+    article_version: int
+    fact_check_report_id: str
+    special_check_report_id: str
+    source_ids: list[str] = []
+    prepared_at: datetime
+    note: str | None = None
 ```
 
-### 3.5 工程实现与不变量（V0.2）
+### 3.5 工程实现与不变量（V0.3）
 
-第 1 周实现位置：
+实现位置：
 
 | 内容 | 模块 |
 | --- | --- |
 | 共享状态 `NewsTaskState` | `backend/app/graph/state.py` |
-| 枚举（任务状态、决策、核查结果等） | `backend/app/schemas/enums.py` |
-| 领域模型（采编计划、来源、稿件、核查报告、发布记录） | `backend/app/schemas/domain.py` |
+| 枚举（任务状态、阶段、决策、核查结果、专项检查结果等） | `backend/app/schemas/enums.py` |
+| 领域模型（采编计划、来源、稿件、核查报告、专项检查、交付材料包） | `backend/app/schemas/domain.py` |
 | 严格模型基类（`extra="forbid"`） | `backend/app/schemas/base.py` |
-| 内存任务存储（第 4 周替换为 MySQL） | `backend/app/services/task_store.py` |
+| 任务存储（内存 / SQLAlchemy） | `backend/app/services/task_store.py`、`backend/app/db/task_store.py` |
+| 任务与执行事件表模型 | `backend/app/models/task.py`、`backend/app/models/execution_event.py` |
 
 模型层强制以下不变量：
 
 1. **核查绑定版本**：存在 `fact_check_report` 时，必须同时提供 `article_id` 和 `article_version`，且报告内的稿件 ID、版本号必须与状态一致；稿件修改后旧核查报告不能继续沿用。
-2. **发布必须确认**：`publication.status = PUBLISHED` 或 `task_status = PUBLISHED` 时，`user_confirmation` 必须为 `True`，且存在已发布的发布记录。
-3. **失败输出必须带错误**：Agent 输出状态为 `FAILED` 时必须包含 `error`；状态为 `COMPLETED` 时不得携带 `error`。
-4. **未知字段拒绝**：所有状态与契约模型 `extra="forbid"`，防止模型输出或请求中出现未约定字段。
+2. **专项检查绑定任务与版本**：`special_check_report` 的 `task_id`、`article_id`、`article_version` 必须与状态一致。
+3. **交付材料必须绑定当前报告**：`PENDING_REVIEW` 或 `DELIVERED` 状态必须存在 `delivery_package`；材料包的任务、稿件、版本、事实核查报告编号、专项检查报告编号必须与状态中的当前值一致。
+4. **失败输出必须带错误**：Agent 输出状态为 `FAILED` 时必须包含 `error`；状态为 `COMPLETED` 时不得携带 `error`。
+5. **未知字段拒绝**：所有状态与契约模型 `extra="forbid"`，防止模型输出或请求中出现未约定字段。
+
+> 当前数据库实现只落 `tasks` 与 `execution_events` 两张表；稿件版本、来源、核查报告、专项检查报告与交付材料包暂存在 `state_json` 快照中，B、D 模块建表后可按实体拆分。
 
 ---
 
@@ -304,19 +342,32 @@ class Publication(BaseModel):
 ```python
 class TaskStatus:
     CREATED = "CREATED"
-    PLANNING = "PLANNING"
-    RESEARCHING = "RESEARCHING"
-    WRITING = "WRITING"
-    EDITING = "EDITING"
-    FACT_CHECKING = "FACT_CHECKING"
-    REVIEWING = "REVIEWING"
+    RUNNING = "RUNNING"
     HUMAN_REVIEW = "HUMAN_REVIEW"
-    PENDING_PUBLISH = "PENDING_PUBLISH"
-    PUBLISHED = "PUBLISHED"
-    REVISION_REQUIRED = "REVISION_REQUIRED"
+    PENDING_REVIEW = "PENDING_REVIEW"
+    DELIVERED = "DELIVERED"
     FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
+    TERMINATED = "TERMINATED"
+
+
+class WorkflowStage:
+    CREATED = "created"
+    CHIEF_PLANNING = "chief_planning"
+    RESEARCH = "research"
+    EDITING = "editing"
+    FACT_CHECK = "fact_check"
+    SPECIAL_CHECK = "special_check"
+    CHIEF_REVIEW = "chief_review"
+    REVISION_REQUIRED = "revision_required"
+    HUMAN_REVIEW = "human_review"
+    PREPARE_DELIVERY = "prepare_delivery"
+    PENDING_REVIEW = "pending_review"
+    DELIVERED = "delivered"
+    ERROR = "error"
+    TERMINATED = "terminated"
 ```
+
+> 任务状态只描述业务归属；具体执行到哪个节点由 `current_stage` 表达，不再把「检索中 / 写作中 / 核查中」等中间态塞进 `TaskStatus`。
 
 ### 4.2 主编决策状态
 
@@ -346,6 +397,15 @@ class AgentStatus:
 | 总体结果 | 报告级 | `PASSED` / `PARTIAL` / `FAILED` |
 | 建议 | 报告级 | `APPROVE` / `REQUEST_EDIT` / `REQUEST_RESEARCH` / `HUMAN_REVIEW` |
 
+### 4.5 专项检查与交付状态
+
+| 枚举 | 所属 | 取值 |
+| --- | --- | --- |
+| 专项检查结论 | 报告级 | `PASSED` / `WARNING` / `BLOCKED` |
+| 问题级别 | 单条问题 | `INFO` / `WARNING` / `BLOCKING` |
+| 人工决定 | 人工审核 | `APPROVE` / `REQUEST_EDIT` / `REQUEST_RESEARCH` / `TERMINATE` |
+| 交付材料包 | 状态字段 | `delivery_package`（`PENDING_REVIEW` / `DELIVERED` 必需） |
+
 ---
 
 ## 5. 状态更新与转移规则
@@ -356,25 +416,25 @@ class AgentStatus:
 4. 系统服务层负责任务状态持久化。
 5. 重要状态变化必须记录日志（`agent_execution_logs`）。
 6. 状态流转由代码控制，不信任模型自行返回的状态值。
-7. 修改稿件后，`fact_check_report` 必须重新生成并关联新的 `article_version`。
+7. 修改稿件后，`fact_check_report` 与 `special_check_report` 必须重新生成并关联新的 `article_version`。
 
 ### 状态与数据库同步
 
-| 工作流位置 | `news_tasks.status` | `current_stage` 示例 |
+| 工作流位置 | `tasks.status` | `current_stage` 示例 |
 | --- | --- | --- |
 | 任务创建 | `CREATED` | `created` |
-| `chief_planning` | `PLANNING` | `chief_planning` |
-| `reporter` 检索阶段 | `RESEARCHING` | `research` |
-| `reporter` 写作阶段 | `WRITING` | `writing` |
-| `editor` | `EDITING` | `editing` |
-| `fact_checker` | `FACT_CHECKING` | `fact_check` |
-| `chief_review` | `REVIEWING` | `chief_review` |
-| 退回决定 | `REVISION_REQUIRED` | `revision_required` |
-| `human_approval` | `HUMAN_REVIEW` | `human_approval` |
-| `publisher` | `PENDING_PUBLISH` | `pending_publish` |
-| `publish` 成功 | `PUBLISHED` | `published` |
+| `chief_planning` | `RUNNING` | `research` |
+| `reporter` | `RUNNING` | `editing` |
+| `editor` | `RUNNING` | `fact_check` |
+| `fact_checker` | `RUNNING` | `special_check` |
+| `special_check` | `RUNNING` | `chief_review` |
+| `chief_review` 退回 | `RUNNING` | `revision_required` |
+| `chief_review` 转人工 | `HUMAN_REVIEW` | `human_review` |
+| `chief_review` 通过 | `RUNNING` | `prepare_delivery` |
+| `prepare_delivery` | `PENDING_REVIEW` | `pending_review` |
+| 用户确认交付 | `DELIVERED` | `delivered` |
+| 用户 / 人工终止 | `TERMINATED` | `terminated` |
 | 异常 | `FAILED` | `error` |
-| 取消 | `CANCELLED` | `cancelled` |
 
 ---
 

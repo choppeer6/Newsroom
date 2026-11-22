@@ -1,17 +1,22 @@
 import asyncio
+from dataclasses import replace
 
+from app.agents.contracts import SpecialCheckOutput
+from app.agents.special_check import SpecialCheckAgent
 from app.core.llm import LLMError
 from app.graph.nodes import create_default_agents
 from app.graph.state import NewsTaskState
 from app.graph.workflow import NewsroomWorkflow
+from app.schemas.domain import SpecialCheckFinding, SpecialCheckIssue
 from app.schemas.enums import (
     AgentStatus,
     ChiefDecision,
     HumanDecision,
-    PublicationStatus,
+    SpecialCheckResult,
+    SpecialCheckSeverity,
     TaskStatus,
+    WorkflowStage,
 )
-from app.services.publish_service import MockPublishService
 from app.tools.search import SearchError
 from tests.fakes import FakeLLM, FakeSearch, make_hit, make_requirements
 
@@ -50,7 +55,7 @@ VERIFY = {
 }
 APPROVE = {
     "chief_decision": "APPROVE",
-    "review_comments": "事实核查全部通过，稿件符合报道要求，可以进入发布流程。",
+    "review_comments": "事实核查全部通过，稿件符合报道要求，可以准备交付。",
 }
 REQUEST_EDIT = {
     "chief_decision": "REQUEST_EDIT",
@@ -72,20 +77,42 @@ HUMAN_REVIEW = {
 TASK_ID = "TASK_WF_001"
 
 
+class BlockedSpecialCheckAgent(SpecialCheckAgent):
+    async def run(self, payload):
+        return SpecialCheckOutput(
+            finding=SpecialCheckFinding(
+                result=SpecialCheckResult.BLOCKED,
+                summary="发现敏感信息，必须人工处理。",
+                issues=[
+                    SpecialCheckIssue(
+                        category="敏感信息",
+                        severity=SpecialCheckSeverity.BLOCKING,
+                        description="稿件包含未经核实的个人隐私信息。",
+                    )
+                ],
+            ),
+            article_id=payload.article_id,
+            article_version=payload.article_version,
+        )
+
+
 def build_workflow(
     responses,
     *,
     search=None,
-    publish_service=None,
-    max_retry: int = 2,
+    max_revision_rounds: int = 2,
+    special_checker=None,
 ):
     llm = FakeLLM(responses)
     agents = create_default_agents(
         llm=llm,
         search=search or FakeSearch(default=[make_hit()]),
-        publish_service=publish_service,
     )
-    workflow = NewsroomWorkflow(agents=agents, max_retry=max_retry)
+    if special_checker is not None:
+        agents = replace(agents, special_checker=special_checker)
+    workflow = NewsroomWorkflow(
+        agents=agents, max_revision_rounds=max_revision_rounds
+    )
     return workflow, llm
 
 
@@ -105,59 +132,46 @@ def resume(workflow: NewsroomWorkflow, value, task_id: str = TASK_ID):
     return asyncio.run(workflow.resume(task_id, value))
 
 
-def test_happy_path_waits_for_confirmation_then_publishes():
+def test_happy_path_prepares_delivery_for_user_review():
     workflow, llm = build_workflow(
         [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, APPROVE]
     )
     result = run(workflow)
 
-    assert result.interrupt is not None
+    assert result.interrupt is None
     state = result.state
-    assert state.task_status == TaskStatus.PENDING_PUBLISH
+    assert state.task_status == TaskStatus.PENDING_REVIEW
+    assert state.current_stage == WorkflowStage.PENDING_REVIEW
     assert state.article_version == 2
     assert state.article_id is not None
     assert state.research_sources
     assert state.fact_check_report is not None
     assert state.fact_check_report.article_version == 2
-    assert state.publication is not None
-    assert state.publication.status == PublicationStatus.PENDING_PUBLISH
+    assert state.special_check_report is not None
+    assert state.special_check_report.result == SpecialCheckResult.PASSED
+    assert state.special_check_report.article_version == 2
     assert state.chief_decision == ChiefDecision.APPROVE
 
-    published = resume(workflow, {"confirm": True})
-    assert published.interrupt is None
-    assert published.state.task_status == TaskStatus.PUBLISHED
-    assert published.state.publication is not None
-    assert published.state.publication.status == PublicationStatus.PUBLISHED
-    assert published.state.publication.external_url is not None
-    assert published.state.user_confirmation is True
+    package = state.delivery_package
+    assert package is not None
+    assert package.article_version == 2
+    assert package.fact_check_report_id == state.fact_check_report.report_id
+    assert package.special_check_report_id == state.special_check_report.report_id
 
-    agents = [entry.agent_name.value for entry in published.state.execution_logs]
+    agents = [entry.agent_name.value for entry in state.execution_logs]
     assert agents == [
         "chief_editor",
         "reporter",
         "editor",
         "fact_checker",
+        "special_checker",
         "chief_editor",
-        "publisher",
-        "publisher",
+        "delivery_preparer",
     ]
     assert len(llm.calls) == 7
 
 
-def test_declining_confirmation_keeps_task_pending():
-    workflow, _ = build_workflow(
-        [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, APPROVE]
-    )
-    run(workflow)
-    result = resume(workflow, {"confirm": False})
-
-    assert result.state.task_status == TaskStatus.PENDING_PUBLISH
-    assert result.state.user_confirmation is False
-    assert result.state.publication is not None
-    assert result.state.publication.status == PublicationStatus.PENDING_PUBLISH
-
-
-def test_request_edit_loop_creates_new_version_and_reruns_fact_check():
+def test_request_edit_loop_creates_new_version_and_reruns_checks():
     workflow, llm = build_workflow(
         [
             PLAN,
@@ -176,12 +190,16 @@ def test_request_edit_loop_creates_new_version_and_reruns_fact_check():
     result = run(workflow)
 
     state = result.state
-    assert result.interrupt is not None
-    assert state.task_status == TaskStatus.PENDING_PUBLISH
+    assert result.interrupt is None
+    assert state.task_status == TaskStatus.PENDING_REVIEW
     assert state.article_version == 3
-    assert state.retry_count == 1
+    assert state.revision_round == 1
     assert state.fact_check_report is not None
     assert state.fact_check_report.article_version == 3
+    assert state.special_check_report is not None
+    assert state.special_check_report.article_version == 3
+    assert state.delivery_package is not None
+    assert state.delivery_package.article_version == 3
     assert "合并重复段落" in llm.calls[7]["user"]
 
 
@@ -207,15 +225,15 @@ def test_request_research_loop_reuses_sources_and_reruns_pipeline():
     result = run(workflow)
 
     state = result.state
-    assert result.interrupt is not None
-    assert state.task_status == TaskStatus.PENDING_PUBLISH
+    assert result.interrupt is None
+    assert state.task_status == TaskStatus.PENDING_REVIEW
     assert state.article_version == 3
-    assert state.retry_count == 1
+    assert state.revision_round == 1
     assert [source.source_id for source in state.research_sources] == ["SRC_0001"]
     assert "修改要求" in llm.calls[8]["user"]
 
 
-def test_human_review_interrupt_can_approve_then_confirm():
+def test_human_review_interrupt_can_approve_then_prepare_delivery():
     workflow, _ = build_workflow(
         [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, HUMAN_REVIEW]
     )
@@ -224,16 +242,15 @@ def test_human_review_interrupt_can_approve_then_confirm():
     assert result.state.task_status == TaskStatus.HUMAN_REVIEW
     assert result.interrupt is not None
     assert result.interrupt["chief_decision"] == "HUMAN_REVIEW"
+    assert result.interrupt["special_check_result"] == "PASSED"
 
     approved = resume(
         workflow, {"decision": "APPROVE", "comments": "人工确认通过"}
     )
+    assert approved.interrupt is None
     assert approved.state.human_decision == HumanDecision.APPROVE
-    assert approved.state.task_status == TaskStatus.PENDING_PUBLISH
-    assert approved.interrupt is not None
-
-    published = resume(workflow, {"confirm": True})
-    assert published.state.task_status == TaskStatus.PUBLISHED
+    assert approved.state.task_status == TaskStatus.PENDING_REVIEW
+    assert approved.state.delivery_package is not None
 
 
 def test_human_review_can_request_edit():
@@ -264,32 +281,51 @@ def test_human_review_can_request_edit():
     )
 
     assert result.state.article_version == 3
-    assert result.state.retry_count == 1
-    assert result.state.task_status == TaskStatus.PENDING_PUBLISH
+    assert result.state.revision_round == 1
+    assert result.state.task_status == TaskStatus.PENDING_REVIEW
 
 
-def test_human_review_terminate_cancels_task():
+def test_human_review_terminate_ends_task():
     workflow, _ = build_workflow(
         [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, HUMAN_REVIEW]
     )
     run(workflow)
     result = resume(workflow, {"decision": "TERMINATE"})
 
-    assert result.state.task_status == TaskStatus.CANCELLED
-    assert result.state.publication is None
+    assert result.state.task_status == TaskStatus.TERMINATED
+    assert result.state.current_stage == WorkflowStage.TERMINATED
+    assert result.state.delivery_package is None
 
 
-def test_retry_cap_forces_human_review():
+def test_revision_cap_forces_human_review():
     workflow, _ = build_workflow(
         [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, REQUEST_RESEARCH],
-        max_retry=0,
+        max_revision_rounds=0,
     )
     result = run(workflow)
 
     assert result.state.task_status == TaskStatus.HUMAN_REVIEW
     assert result.state.chief_decision == ChiefDecision.HUMAN_REVIEW
-    assert result.state.retry_count == 0
+    assert result.state.revision_round == 0
     assert result.interrupt is not None
+
+
+def test_blocked_special_check_cannot_be_overridden_by_human_approval():
+    workflow, _ = build_workflow(
+        [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, APPROVE],
+        special_checker=BlockedSpecialCheckAgent(),
+    )
+    result = run(workflow)
+
+    assert result.state.task_status == TaskStatus.HUMAN_REVIEW
+    assert result.state.chief_decision == ChiefDecision.HUMAN_REVIEW
+    assert result.interrupt is not None
+
+    approved = resume(workflow, {"decision": "APPROVE", "comments": "希望放行"})
+    assert approved.state.task_status == TaskStatus.HUMAN_REVIEW
+    assert approved.state.current_stage == WorkflowStage.HUMAN_REVIEW
+    assert approved.state.delivery_package is None
+    assert "无法准备交付" in (approved.state.review_comments or "")
 
 
 def test_agent_failure_ends_workflow_with_error():
@@ -318,31 +354,14 @@ def test_search_failure_ends_workflow_with_error():
     assert result.state.error.code == "SEARCH_FAILED"
 
 
-def test_publish_failure_keeps_pending_record():
-    workflow, _ = build_workflow(
-        [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, APPROVE],
-        publish_service=MockPublishService(fail_times=1, failure_message="接口超时"),
-    )
-    run(workflow)
-    result = resume(workflow, {"confirm": True})
-
-    state = result.state
-    assert state.task_status == TaskStatus.PENDING_PUBLISH
-    assert state.error is not None
-    assert state.error.code == "PUBLISH_FAILED"
-    assert state.publication is not None
-    assert state.publication.status == PublicationStatus.PENDING_PUBLISH
-    assert "接口超时" in (state.publication.message or "")
-
-
 def test_checkpoint_state_is_available_after_interrupt():
     workflow, _ = build_workflow(
-        [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, APPROVE]
+        [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, HUMAN_REVIEW]
     )
     run(workflow)
     snapshot = asyncio.run(workflow.get_state(TASK_ID))
 
     assert snapshot is not None
-    assert snapshot.state.task_status == TaskStatus.PENDING_PUBLISH
+    assert snapshot.state.task_status == TaskStatus.HUMAN_REVIEW
     assert snapshot.interrupt is not None
     assert snapshot.interrupt["article_version"] == 2

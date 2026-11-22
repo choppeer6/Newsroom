@@ -18,8 +18,9 @@ PROMPT_CONTEXTS = {
         "article_version": 2,
         "sources_json": "[]",
         "fact_check_json": "{}",
-        "retry_count": 0,
-        "max_retry": 2,
+        "special_check_json": "{}",
+        "revision_round": 0,
+        "max_revision_rounds": 2,
     },
     ("reporter", "search_queries"): {
         "plan_json": "{}",

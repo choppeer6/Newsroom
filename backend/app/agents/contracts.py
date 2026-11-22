@@ -5,6 +5,7 @@ from pydantic import Field, model_validator
 from app.schemas.base import StrictModel
 from app.schemas.domain import (
     ArticleContent,
+    DeliveryPackage,
     EditorialPlan,
     EditingReport,
     ErrorInfo,
@@ -13,6 +14,8 @@ from app.schemas.domain import (
     Publication,
     ResearchSource,
     RevisionRequest,
+    SpecialCheckFinding,
+    SpecialCheckReport,
     TaskRequirements,
 )
 from app.schemas.enums import (
@@ -20,6 +23,7 @@ from app.schemas.enums import (
     ChiefDecision,
     FactCheckOverallResult,
     RevisionTarget,
+    SpecialCheckResult,
 )
 
 
@@ -133,6 +137,41 @@ class FactCheckerOutput(AgentOutput):
         return self
 
 
+class SpecialCheckInput(AgentInput):
+    article_id: str = Field(min_length=1)
+    article: ArticleContent
+    article_version: int = Field(ge=1)
+    fact_check_report: FactCheckReport
+    sources: list[ResearchSource] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _report_binding(self) -> "SpecialCheckInput":
+        if self.fact_check_report.article_id != self.article_id:
+            raise ValueError("fact_check_report.article_id does not match article_id")
+        if self.fact_check_report.article_version != self.article_version:
+            raise ValueError(
+                "fact_check_report.article_version does not match article_version"
+            )
+        return self
+
+
+class SpecialCheckOutput(AgentOutput):
+    finding: SpecialCheckFinding | None = None
+    article_id: str | None = None
+    article_version: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _payload_when_completed(self) -> "SpecialCheckOutput":
+        if self.status == AgentStatus.COMPLETED:
+            if self.finding is None:
+                raise ValueError("finding is required when status is COMPLETED")
+            if self.article_id is None:
+                raise ValueError("article_id is required when status is COMPLETED")
+            if self.article_version is None:
+                raise ValueError("article_version is required when status is COMPLETED")
+        return self
+
+
 class ChiefReviewInput(AgentInput):
     topic: str = Field(min_length=1, max_length=500)
     description: str = Field(default="", max_length=5000)
@@ -143,8 +182,23 @@ class ChiefReviewInput(AgentInput):
     article_id: str = Field(min_length=1)
     article_version: int = Field(ge=1)
     fact_check_report: FactCheckReport
-    retry_count: int = Field(default=0, ge=0)
-    max_retry: int = Field(default=2, ge=0)
+    special_check_report: SpecialCheckReport
+    revision_round: int = Field(default=0, ge=0)
+    max_revision_rounds: int = Field(default=2, ge=0)
+
+    @model_validator(mode="after")
+    def _reports_match_article(self) -> "ChiefReviewInput":
+        for name, report in (
+            ("fact_check_report", self.fact_check_report),
+            ("special_check_report", self.special_check_report),
+        ):
+            if report.article_id != self.article_id:
+                raise ValueError(f"{name}.article_id does not match article_id")
+            if report.article_version != self.article_version:
+                raise ValueError(
+                    f"{name}.article_version does not match article_version"
+                )
+        return self
 
 
 class ChiefReviewOutput(AgentOutput):
@@ -174,6 +228,43 @@ class ChiefReviewOutput(AgentOutput):
                 raise ValueError("REQUEST_RESEARCH requires revision_request")
             if self.revision_request.target != RevisionTarget.REPORTER:
                 raise ValueError("REQUEST_RESEARCH requires revision_request.target=reporter")
+        return self
+
+
+class DeliveryPreparationInput(AgentInput):
+    article_id: str = Field(min_length=1)
+    article: ArticleContent
+    article_version: int = Field(ge=1)
+    fact_check_report: FactCheckReport
+    special_check_report: SpecialCheckReport
+    sources: list[ResearchSource] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _delivery_preconditions(self) -> "DeliveryPreparationInput":
+        if self.fact_check_report.overall_result == FactCheckOverallResult.FAILED:
+            raise ValueError("delivery rejects articles with FAILED fact check")
+        if self.special_check_report.result == SpecialCheckResult.BLOCKED:
+            raise ValueError("delivery rejects articles with BLOCKED special check")
+        for name, report in (
+            ("fact_check_report", self.fact_check_report),
+            ("special_check_report", self.special_check_report),
+        ):
+            if report.article_id != self.article_id:
+                raise ValueError(f"{name}.article_id does not match article_id")
+            if report.article_version != self.article_version:
+                raise ValueError(
+                    f"{name}.article_version does not match article_version"
+                )
+        return self
+
+
+class DeliveryPreparationOutput(AgentOutput):
+    package: DeliveryPackage | None = None
+
+    @model_validator(mode="after")
+    def _payload_when_completed(self) -> "DeliveryPreparationOutput":
+        if self.status == AgentStatus.COMPLETED and self.package is None:
+            raise ValueError("package is required when status is COMPLETED")
         return self
 
 
@@ -214,6 +305,9 @@ AGENT_CONTRACTS: dict[str, AgentContract] = {
     "reporter": AgentContract(ReporterInput, ReporterOutput),
     "editor": AgentContract(EditorInput, EditorOutput),
     "fact_checker": AgentContract(FactCheckerInput, FactCheckerOutput),
+    "special_check": AgentContract(SpecialCheckInput, SpecialCheckOutput),
     "chief_review": AgentContract(ChiefReviewInput, ChiefReviewOutput),
-    "publisher": AgentContract(PublisherInput, PublisherOutput),
+    "prepare_delivery": AgentContract(
+        DeliveryPreparationInput, DeliveryPreparationOutput
+    ),
 }

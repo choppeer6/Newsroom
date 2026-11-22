@@ -36,7 +36,7 @@ backend/app/prompts/
     └── source_rules.yaml
 ```
 
-主编与发布 Prompt 在第 3 周加入。结构化输出约束以 Pydantic 模型为准（各 Agent 内部的 Payload 模型与契约模型），不再维护单独的 JSON Schema 文件。
+主编 Prompt 在第 3 周加入。专项检查与预发布准备节点不使用 LLM Prompt（当前为确定性实现）。结构化输出约束以 Pydantic 模型为准（各 Agent 内部的 Payload 模型与契约模型），不再维护单独的 JSON Schema 文件。
 
 **版本规则**
 
@@ -204,24 +204,17 @@ prompts:
 
 ---
 
-### 4.6 审核发布 — `publisher`
+### 4.6 专项检查与预发布准备 — `special_check` / `prepare_delivery`
 
-审核发布以**规则校验**为主，LLM 不参与「是否发布」的决策。
+两个节点当前**不使用 LLM Prompt**，全部由代码完成：
 
-```
-你是发布流程校验器。只检查前置条件并生成说明，不决定内容是否合格。
+- `special_check`：D 模块接口桩，校验核查报告与稿件版本绑定后返回 `PASSED`（后续接入真实检查时仍应保持输出契约不变）；
+- `prepare_delivery`：校验交付前置条件（`APPROVE`、事实核查非 `FAILED`、专项检查非 `BLOCKED`、报告版本一致），汇总稿件、来源与两份报告生成 `DeliveryPackage`；
+- 系统不对外发布，后续接入真实模型时也不得让模型决定「是否发布」或绕过用户复核。
 
-前置条件：
-1. chief_decision == APPROVE
-2. fact_check_status != FAILED
-3. 发布稿件版本与最新核查报告版本一致
-4. 用户已明确确认（user_confirmation == true）
+原审核发布 Prompt 随 `publisher` 退出工作流，仅保留在 B/D 模块交接桩中，不再用于当前流程。
 
-任一条件不满足，拒绝发布并返回明确原因。
-发布内容不得改写。输出 JSON。
-```
-
-**工具**：`create_publication_record`、`get_publication`、`publish_to_channel`、`notify_user`
+**工具**：无（两个节点均不调用外部工具）
 
 ---
 
@@ -272,7 +265,7 @@ prompts:
 }
 ```
 
-### `create_publication_record`
+### `create_publication_record`（B/D 交接保留，当前工作流不调用）
 
 ```json
 {
@@ -290,7 +283,7 @@ prompts:
 }
 ```
 
-### `publish_to_channel`
+### `publish_to_channel`（B/D 交接保留，当前工作流不调用）
 
 ```json
 {
@@ -373,3 +366,12 @@ prompts:
 - Publisher 不使用 Prompt：发布前置条件、待发布记录与幂等控制全部由代码完成，避免模型绕过用户确认。
 - 决策兜底在代码层完成：`APPROVE` 仅在 `PASSED` 时保留；退回目标由决策枚举决定；退回次数达到上限强制转人工。
 - Prompt 渲染测试已覆盖 `chief_editor.planning` 与 `chief_editor.review`。
+
+## 11. V0.4 实现记录（2026-11-22）
+
+- `chief_editor.review` 模板新增 `special_check_json`、`revision_round`、`max_revision_rounds`，系统提示补充专项检查约束：
+  - 专项检查 `BLOCKED` 时不得 `APPROVE`，`WARNING` 时谨慎并注明提示项；
+  - 修改轮次达到上限时必须返回 `HUMAN_REVIEW`。
+- 新增 `special_check`、`prepare_delivery` 节点，均为确定性实现，不新增 Prompt 文件。
+- `publisher` Prompt 与发布工具随发布链退出当前工作流，仅在交接桩中保留。
+- 渲染测试同步覆盖新增模板变量。

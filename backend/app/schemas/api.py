@@ -5,10 +5,16 @@ from pydantic import Field
 
 from app.graph.state import NewsTaskState
 from app.schemas.base import StrictModel
-from app.schemas.domain import ErrorInfo, FactCheckReport, TaskRequirements
+from app.schemas.domain import (
+    DeliveryPackage,
+    ErrorInfo,
+    FactCheckReport,
+    SpecialCheckReport,
+    TaskRequirements,
+)
 from app.schemas.enums import (
     FactCheckOverallResult,
-    PublicationStatus,
+    SpecialCheckResult,
     TaskStatus,
     WorkflowStage,
 )
@@ -56,6 +62,18 @@ class FactCheckSummary(StrictModel):
     overall_result: FactCheckOverallResult
 
 
+class SpecialCheckSummary(StrictModel):
+    report_id: str
+    article_version: int
+    result: SpecialCheckResult
+
+
+class DeliverySummary(StrictModel):
+    package_id: str
+    article_version: int
+    prepared_at: datetime
+
+
 class TaskSummary(StrictModel):
     task_id: str
     topic: str
@@ -79,15 +97,19 @@ class TaskSummary(StrictModel):
 class TaskDetail(TaskSummary):
     description: str
     requirements: TaskRequirements
-    retry_count: int
+    paused: bool
+    revision_round: int
     article_version: int | None
     latest_fact_check: FactCheckSummary | None
-    publication_status: PublicationStatus | None
+    latest_special_check: SpecialCheckSummary | None
+    delivery: DeliverySummary | None
     error: ErrorInfo | None
 
     @classmethod
     def from_state(cls, state: NewsTaskState) -> "TaskDetail":
         report: FactCheckReport | None = state.fact_check_report
+        special: SpecialCheckReport | None = state.special_check_report
+        package: DeliveryPackage | None = state.delivery_package
         return cls(
             task_id=state.task_id,
             topic=state.topic,
@@ -97,7 +119,8 @@ class TaskDetail(TaskSummary):
             updated_at=state.updated_at,
             description=state.description,
             requirements=state.requirements,
-            retry_count=state.retry_count,
+            paused=state.paused,
+            revision_round=state.revision_round,
             article_version=state.article_version,
             latest_fact_check=(
                 FactCheckSummary(
@@ -108,8 +131,23 @@ class TaskDetail(TaskSummary):
                 if report is not None
                 else None
             ),
-            publication_status=(
-                state.publication.status if state.publication is not None else None
+            latest_special_check=(
+                SpecialCheckSummary(
+                    report_id=special.report_id,
+                    article_version=special.article_version,
+                    result=special.result,
+                )
+                if special is not None
+                else None
+            ),
+            delivery=(
+                DeliverySummary(
+                    package_id=package.package_id,
+                    article_version=package.article_version,
+                    prepared_at=package.prepared_at,
+                )
+                if package is not None
+                else None
             ),
             error=state.error,
         )

@@ -56,7 +56,9 @@
 
 ### 1.5 任务状态
 
-`CREATED, PLANNING, RESEARCHING, WRITING, EDITING, FACT_CHECKING, REVIEWING, HUMAN_REVIEW, PENDING_PUBLISH, PUBLISHED, REVISION_REQUIRED, FAILED, CANCELLED`
+`CREATED, RUNNING, HUMAN_REVIEW, PENDING_REVIEW, DELIVERED, FAILED, TERMINATED`
+
+具体执行位置由 `current_stage` 返回：`created / chief_planning / research / editing / fact_check / special_check / chief_review / revision_required / human_review / prepare_delivery / pending_review / delivered / error / terminated`。
 
 ---
 
@@ -281,68 +283,67 @@
 ```json
 {
   "decision": "APPROVE",
-  "comments": "内容与来源一致，同意进入发布流程。"
+  "comments": "内容与来源一致，同意准备交付材料。"
 }
 ```
 
 - `decision`: `APPROVE` | `REQUEST_EDIT` | `REQUEST_RESEARCH` | `TERMINATE`；
-- `APPROVE` → 进入 `publisher`；
+- `APPROVE` → 进入 `prepare_delivery`，完成后任务为 `PENDING_REVIEW`；
 - `REQUEST_EDIT` → 返回 `editor`；
 - `REQUEST_RESEARCH` → 返回 `reporter`；
-- `TERMINATE` → 任务 `CANCELLED`。
+- `TERMINATE` → 任务 `TERMINATED`；
+- 若事实核查为 `FAILED` 或专项检查为 `BLOCKED`，`APPROVE` 不会进入交付准备，任务保持 `HUMAN_REVIEW` 并在审核意见中说明原因。
 
 响应：
 
 ```json
-{ "data": { "review_id": "REV_002", "decision": "APPROVE", "status": "PENDING_PUBLISH" } }
+{ "data": { "review_id": "REV_002", "decision": "APPROVE", "status": "PENDING_REVIEW" } }
 ```
 
 ---
 
-## 7. 发布接口
+## 7. 交付接口
 
-### 7.1 `GET /api/news/tasks/{task_id}/publication` — 待发布 / 发布记录
+> 系统不执行对外发布。审核通过后由 `prepare_delivery` 生成交付材料包，任务进入 `PENDING_REVIEW`；用户复核后自行导出与提交。
+
+### 7.1 `GET /api/news/tasks/{task_id}/delivery` — 交付材料包
 
 ```json
 {
-  "publication_id": "PUB_001",
+  "package_id": "DLV_0001",
+  "task_id": "TASK_001",
   "article_id": "ARTICLE_001",
   "article_version": 2,
-  "status": "PENDING_PUBLISH",
-  "confirmed_by": null,
-  "confirmed_at": null,
-  "published_at": null,
-  "external_url": null,
-  "message": "稿件已进入待发布状态，等待用户确认"
+  "fact_check_report_id": "FC_0001",
+  "special_check_report_id": "SC_0001",
+  "source_ids": ["SRC_0001", "SRC_0002"],
+  "prepared_at": "2026-11-22T16:30:00+08:00",
+  "note": "预发布材料已准备，等待用户复核与导出。"
 }
 ```
 
-### 7.2 `POST /api/news/tasks/{task_id}/publication/confirm` — 用户确认
+### 7.2 `POST /api/news/tasks/{task_id}/delivery/confirm` — 用户确认交付
 
-仅在任务状态为 `PENDING_PUBLISH` 时允许。
+仅在任务状态为 `PENDING_REVIEW` 时允许。
 
 ```json
 { "confirmed": true }
 ```
 
-- `confirmed=true`：调用发布接口，成功返回 `PUBLISHED`，失败保持 `PENDING_PUBLISH` 且 `publication.status=FAILED`；
-- `confirmed=false`：保持待发布状态，任务状态仍为 `PENDING_PUBLISH`。
+- `confirmed=true`：任务进入 `DELIVERED`，记录确认时间与操作人；
+- `confirmed=false`：保持 `PENDING_REVIEW`，材料不丢失。
 
 响应：
 
 ```json
-{
-  "data": {
-    "status": "PUBLISHED",
-    "published_at": "2026-11-13T16:30:00+08:00",
-    "external_url": "https://mock.example.com/news/ARTICLE_001"
-  }
-}
+{ "data": { "task_id": "TASK_001", "status": "DELIVERED", "delivered_at": "..." } }
 ```
 
-### 7.3 `POST /api/news/tasks/{task_id}/publication/retry` — 发布失败重试
+### 7.3 终止
 
-仅当 `publication.status == "FAILED"` 时允许；重复请求幂等返回已有结果。
+复用 `POST /api/news/tasks/{task_id}/cancel`：未交付任务终止后为 `TERMINATED`；`DELIVERED` 任务不允许终止。
+
+> 以上交付接口由 C-05 执行服务实现。当前演示控制台使用 `/api/news/demo/tasks/{task_id}/confirm`，语义与 7.2 一致。
 
 ---
 
@@ -377,18 +378,17 @@
 | --- | --- |
 | `POST /tasks` | — |
 | `GET /tasks/{id}` | 任意 |
-| `POST /tasks/{id}/cancel` | 除 `PUBLISHED`、`CANCELLED` 外的未完成状态 |
+| `POST /tasks/{id}/cancel` | 除 `DELIVERED`、`TERMINATED` 外的未完成状态 |
 | `GET /tasks/{id}/article` | 已生成稿件后 |
 | `POST /tasks/{id}/human-review` | `HUMAN_REVIEW` |
-| `GET /tasks/{id}/publication` | `PENDING_PUBLISH`、`PUBLISHED`、失败待重试 |
-| `POST /tasks/{id}/publication/confirm` | `PENDING_PUBLISH` |
-| `POST /tasks/{id}/publication/retry` | `PENDING_PUBLISH` 且 `publication.status=FAILED` |
+| `GET /tasks/{id}/delivery` | `PENDING_REVIEW`、`DELIVERED` |
+| `POST /tasks/{id}/delivery/confirm` | `PENDING_REVIEW` |
 
 ---
 
 ## 10. 非功能约定
 
-- 创建任务、人工审核、发布确认接口支持 `Idempotency-Key`，服务端 24h 内去重；
+- 创建任务、人工审核、交付确认接口支持 `Idempotency-Key`，服务端 24h 内去重；
 - 所有写接口记录审计日志（操作人、IP、请求摘要）；
 - 错误响应不返回堆栈、Prompt、密钥等内部信息；
 - 单用户任务创建限流 10 次/分钟；
@@ -396,19 +396,26 @@
 
 ---
 
-## 11. 第 1 周实现状态（V0.2）
+## 11. 实现状态（2026-11-22）
 
 ### 11.1 已实现接口
 
 | 方法 | 路径 | 状态 | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/news/health` | 已实现 | 返回服务状态、版本、环境及 LLM / 搜索配置状态 |
-| `POST` | `/api/news/tasks` | 已实现 | 创建任务并生成 `NewsTaskState`；当前存储于内存 |
+| `POST` | `/api/news/tasks` | 已实现 | 创建任务并生成 `NewsTaskState`；默认持久化到 SQLite / MySQL |
 | `GET` | `/api/news/tasks` | 已实现 | 支持 `status`、`keyword`、`page`、`page_size` |
-| `GET` | `/api/news/tasks/{task_id}` | 已实现 | 返回任务摘要、当前阶段、核查摘要和发布状态 |
-| `POST` | `/api/news/tasks/{task_id}/cancel` | 已实现 | 已发布或已取消任务返回 `2002` |
+| `GET` | `/api/news/tasks/{task_id}` | 已实现 | 返回任务摘要、当前阶段、修改轮次、核查 / 专项检查摘要与交付材料摘要 |
+| `POST` | `/api/news/tasks/{task_id}/cancel` | 已实现 | 已交付或已终止任务返回 `2002`；终止后状态为 `TERMINATED` |
+| `GET` | `/api/news/demo/meta` | 演示 | 联调页配置信息 |
+| `POST` | `/api/news/demo/tasks` | 演示 | 启动演示任务（进程内运行工作流） |
+| `GET` | `/api/news/demo/tasks/{task_id}` | 演示 | 演示任务快照（阶段、中断、核查、专项检查、交付材料） |
+| `POST` | `/api/news/demo/tasks/{task_id}/review` | 演示 | 提交人工审核结论并恢复工作流 |
+| `POST` | `/api/news/demo/tasks/{task_id}/confirm` | 演示 | 待复核阶段确认交付（`DELIVERED`）或暂不交付 |
 
-其余接口（文章、核查报告、审核、发布、日志、SSE）将在后续周次实现。
+`TaskDetail` 字段：`paused`、`revision_round`、`article_version`、`latest_fact_check`、`latest_special_check`、`delivery`、`error`。
+
+其余正式执行接口（创建后触发执行、人工审核、交付确认、日志查询、SSE）由 C-05 实现，届时演示接口并入 `/tasks`。
 
 ### 11.2 已实现的通用约定
 

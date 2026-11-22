@@ -13,11 +13,10 @@ from app.core.utils import generate_id
 from app.graph.state import NewsTaskState
 from app.graph.workflow import NewsroomWorkflow, WorkflowResult
 from app.schemas.domain import TaskRequirements
-from app.schemas.enums import HumanDecision, TaskStatus
+from app.schemas.enums import HumanDecision, TaskStatus, WorkflowStage
 
 logger = logging.getLogger(__name__)
 
-CONFIRMATION_KEYS = {"publication"}
 _REVISION_DECISIONS = {HumanDecision.REQUEST_EDIT, HumanDecision.REQUEST_RESEARCH}
 
 
@@ -81,9 +80,6 @@ class DemoService:
         revision_requirements: list[str],
     ) -> DemoJob:
         job = self._waiting_job(task_id)
-        if self._expects_confirmation(job):
-            raise ConflictError("当前任务等待发布确认，不能提交审核结论")
-
         value: dict[str, Any] = {"decision": decision.value}
         if comments:
             value["comments"] = comments
@@ -93,11 +89,16 @@ class DemoService:
         self._resume(job, value)
         return job
 
-    def submit_confirmation(self, task_id: str, *, confirm: bool) -> DemoJob:
-        job = self._waiting_job(task_id)
-        if not self._expects_confirmation(job):
-            raise ConflictError("当前任务不在发布确认环节")
-        self._resume(job, {"confirm": confirm})
+    def submit_delivery(self, task_id: str, *, confirm: bool) -> DemoJob:
+        job = self._get(task_id)
+        if job.running:
+            raise ConflictError("任务仍在执行，请等待当前步骤结束")
+        if job.state.task_status != TaskStatus.PENDING_REVIEW:
+            raise ConflictError("当前任务不在待复核环节")
+        if confirm:
+            job.state.task_status = TaskStatus.DELIVERED
+            job.state.current_stage = WorkflowStage.DELIVERED
+            job.state.touch()
         return job
 
     def snapshot(self, task_id: str) -> dict[str, Any]:
@@ -105,14 +106,17 @@ class DemoService:
         state = job.state
         article = state.edited_article or state.draft_article
         report = state.fact_check_report
+        special = state.special_check_report
+        package = state.delivery_package
         return {
             "task_id": state.task_id,
             "topic": state.topic,
             "phase": self._phase(job),
             "task_status": state.task_status.value,
             "current_stage": state.current_stage.value,
-            "retry_count": state.retry_count,
-            "max_retry": get_settings().max_revision_rounds,
+            "paused": state.paused,
+            "revision_round": state.revision_round,
+            "max_revision_rounds": get_settings().max_revision_rounds,
             "updated_at": state.updated_at.isoformat(),
             "interrupt": job.interrupt,
             "plan": state.editorial_plan.model_dump(mode="json")
@@ -157,6 +161,19 @@ class DemoService:
                 if report
                 else None
             ),
+            "special_check": (
+                {
+                    "report_id": special.report_id,
+                    "article_version": special.article_version,
+                    "result": special.result.value,
+                    "summary": special.summary,
+                    "issues": [
+                        issue.model_dump(mode="json") for issue in special.issues
+                    ],
+                }
+                if special
+                else None
+            ),
             "chief": {
                 "decision": state.chief_decision.value if state.chief_decision else None,
                 "comments": state.review_comments,
@@ -164,9 +181,16 @@ class DemoService:
             "revision": state.revision_request.model_dump(mode="json")
             if state.revision_request
             else None,
-            "publication": state.publication.model_dump(mode="json")
-            if state.publication
-            else None,
+            "delivery": (
+                {
+                    "package_id": package.package_id,
+                    "article_version": package.article_version,
+                    "prepared_at": package.prepared_at.isoformat(),
+                    "note": package.note,
+                }
+                if package
+                else None
+            ),
             "logs": [
                 {
                     "agent": entry.agent_name.value,
@@ -215,21 +239,19 @@ class DemoService:
         job.interrupt = result.interrupt
 
     @staticmethod
-    def _expects_confirmation(job: DemoJob) -> bool:
-        return bool(job.interrupt and CONFIRMATION_KEYS & job.interrupt.keys())
-
-    @staticmethod
     def _phase(job: DemoJob) -> str:
         if job.running:
             return "running"
         if job.error or job.state.task_status == TaskStatus.FAILED:
             return "failed"
         if job.interrupt is not None:
-            return (
-                "publish_confirmation"
-                if DemoService._expects_confirmation(job)
-                else "human_review"
-            )
+            return "human_review"
+        if job.state.task_status == TaskStatus.PENDING_REVIEW:
+            return "pending_review"
+        if job.state.task_status == TaskStatus.DELIVERED:
+            return "delivered"
+        if job.state.task_status == TaskStatus.TERMINATED:
+            return "terminated"
         return "finished"
 
     def _waiting_job(self, task_id: str) -> DemoJob:
