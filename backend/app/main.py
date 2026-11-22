@@ -15,7 +15,9 @@ from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.db.session import dispose_db, init_db
 from app.db.task_store import SqlTaskStore
+from app.graph.workflow import NewsroomWorkflow
 from app.services.demo_service import DemoService
+from app.services.execution_service import ExecutionService
 from app.services.task_service import TaskService
 from app.services.task_store import TaskStore
 
@@ -56,6 +58,7 @@ def create_app(
     *,
     settings: Settings | None = None,
     task_store: TaskStore | None = None,
+    workflow: NewsroomWorkflow | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
 
@@ -71,6 +74,10 @@ def create_app(
             application.state.task_service = TaskService(
                 SqlTaskStore(session_factory)
             )
+        application.state.execution_service = ExecutionService(
+            application.state.task_service,
+            workflow=workflow,
+        )
         try:
             yield
         finally:

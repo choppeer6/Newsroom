@@ -177,3 +177,9 @@ class NewsroomWorkflow:
             state=_coerce_state(snapshot.values),
             interrupt=_interrupt_value(snapshot),
         )
+
+    async def has_pending_interrupt(self, task_id: str) -> bool:
+        snapshot = await self._graph.aget_state(self._config(task_id))
+        if not snapshot or not snapshot.next:
+            return False
+        return bool(getattr(snapshot, "interrupts", None))

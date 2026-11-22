@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Generic, TypeVar
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.graph.state import NewsTaskState
 from app.schemas.base import StrictModel
@@ -14,12 +14,15 @@ from app.schemas.domain import (
 )
 from app.schemas.enums import (
     FactCheckOverallResult,
+    HumanDecision,
     SpecialCheckResult,
     TaskStatus,
     WorkflowStage,
 )
 
 T = TypeVar("T")
+
+_REVISION_DECISIONS = {HumanDecision.REQUEST_EDIT, HumanDecision.REQUEST_RESEARCH}
 
 
 class ApiResponse(StrictModel, Generic[T]):
@@ -72,6 +75,26 @@ class DeliverySummary(StrictModel):
     package_id: str
     article_version: int
     prepared_at: datetime
+
+
+class HumanReviewRequest(StrictModel):
+    decision: HumanDecision
+    comments: str | None = Field(default=None, max_length=2000)
+    revision_reason: str | None = Field(default=None, max_length=1000)
+    revision_requirements: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def _revision_fields(self) -> "HumanReviewRequest":
+        if self.decision in _REVISION_DECISIONS:
+            if not (self.revision_reason or "").strip():
+                raise ValueError("退回修改必须填写原因")
+            if not [item for item in self.revision_requirements if item.strip()]:
+                raise ValueError("退回修改至少需要一条修改要求")
+        return self
+
+
+class DeliveryConfirmRequest(StrictModel):
+    confirmed: bool
 
 
 class TaskSummary(StrictModel):

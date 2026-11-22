@@ -14,3 +14,8 @@ class NotFoundError(AppError):
 class ConflictError(AppError):
     def __init__(self, message: str = "当前状态不允许该操作") -> None:
         super().__init__(code=2002, message=message, http_status=409)
+
+
+class BusyError(ConflictError):
+    def __init__(self, message: str = "任务正在执行") -> None:
+        AppError.__init__(self, code=2003, message=message, http_status=409)

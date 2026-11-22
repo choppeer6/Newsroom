@@ -255,9 +255,12 @@ def route_after_human_approval(state: NewsTaskState) -> str:
 ### 6.4 暂停与恢复
 
 - 使用 LangGraph Checkpointer 保存每个节点执行后的状态，`thread_id = task_id`；
-- 任务失败或服务重启后，可从最近检查点恢复；
-- 停在 `human_approval` 阶段的任务，必须通过人工接口恢复；
+- 执行服务采用**同步推进**：`execute` / `human-review` / `resume` 请求会运行到下一个暂停点（人工审核、待复核、失败或终止）后返回，不创建后台任务；
+- 执行期间持有任务级执行锁（默认 900 秒 TTL），并发执行返回 `2003`；
+- 停在 `human_approval` 阶段的任务，必须通过人工接口恢复；恢复前校验检查点存在待处理的中断；
 - `PENDING_REVIEW` 阶段不再恢复图，由执行服务更新交付 / 终止状态；
+- 暂停是同步模式下的启动闸门：`pause` 后 `execute` / `resume` 被拒绝，`resume` 清除暂停并立即执行；
+- 任务失败或服务重启后的检查点恢复仍待 C-06 实现；`MemorySaver` 不跨进程保留；
 - 恢复时不得重复执行已完成节点（幂等：来源按 URL 去重、稿件版本按 `(article_id, version)` 唯一）。
 
 ---
@@ -410,5 +413,17 @@ result = await workflow.resume("TASK_001", {"decision": "APPROVE", "comments": "
 ### 10.5 验证结果
 
 - 2026-11-14（第 3 周）：自动化测试 120 项通过，真实 DeepSeek + Tavily 冒烟到达 `PUBLISHED`（旧发布链，已按分工文档废弃）。
-- 2026-11-22（第 4 周）：全量测试 140 项通过；正常链路到达 `PENDING_REVIEW` 并生成交付材料包；修改轮次、硬阻断、人工终止、失败节点等分支均有覆盖。
-- 尚未覆盖：执行接口触发（C-05）、接口失败重试独立计数（C-04）、进程重启恢复与重复启动防护（C-06）、真实专项检查规则。
+- 2026-11-22（第 4 周）：全量测试 163 项通过；正常链路到达 `PENDING_REVIEW` 并生成交付材料包；修改轮次、硬阻断、人工终止、失败节点等分支均有覆盖。
+- 2026-11-22（C-05）：执行服务与接口测试覆盖同步执行、暂停 / 恢复、人工批准 / 退回 / 终止、交付确认、执行事件、执行锁冲突与运行时异常落库。
+- 尚未覆盖：接口失败重试独立计数（C-04）、进程重启恢复与重复启动防护（C-06）、真实专项检查规则、SSE 实时进度。
+
+### 10.6 执行服务（C-05）
+
+| 模块 | 位置 | 说明 |
+| --- | --- | --- |
+| 执行服务 | `backend/app/services/execution_service.py` | 同步执行、暂停 / 恢复、人工审核、交付确认、事件查询；执行锁与失败落库 |
+| 正式接口 | `backend/app/api/routes/tasks.py` | `execute / pause / resume / human-review / delivery / delivery/confirm / events` |
+| 执行锁 TTL | `Settings.execution_lock_ttl_seconds` | 默认 900 秒，防止并发执行同一任务 |
+| 检查点状态 | `NewsroomWorkflow.has_pending_interrupt` | 恢复人工审核前确认存在待处理中断 |
+
+写接口统一返回最新 `TaskDetail`，便于前端一次拿到执行结果；异常约定：状态不允许 `2002`，执行锁占用 `2003`，参数错误 `1001`，任务不存在 `2001`。

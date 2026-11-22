@@ -437,3 +437,38 @@ flowchart TD
 - C-04 接口失败重试计数与展示待接入执行服务；
 - C-06 重启恢复、重复启动防护（执行锁已就绪）与手工编辑后的版本失效待实现；
 - 专项检查与预发布准备当前为占位实现，待 D 模块交付真实逻辑后替换，契约保持不变。
+
+## 15. C-05 执行服务与接口（2026-11-22）
+
+**已完成**
+
+- 新增 `ExecutionService`（`backend/app/services/execution_service.py`），负责正式任务的执行编排：
+  - `execute`：仅 `CREATED` 且未暂停的任务，同步推进到下一个暂停点（人工审核 / 待复核 / 失败 / 终止）；
+  - `pause` / `resume`：同步模式下的启动闸门，暂停后禁止执行，恢复后立即执行；
+  - `submit_human_review`：校验任务状态与待处理中断后恢复工作流，支持批准、退回修改、终止；
+  - `confirm_delivery`：`PENDING_REVIEW` 下确认交付置为 `DELIVERED`，拒绝时保持待复核；
+  - `list_events`：按序返回 Agent 执行事件。
+- 正式接口接入 `/api/news/tasks`：
+  - `POST /{task_id}/execute`、`/pause`、`/resume`；
+  - `POST /{task_id}/human-review`（批准 / 退回 / 终止，返回最新 `TaskDetail`）；
+  - `GET /{task_id}/delivery`、`POST /{task_id}/delivery/confirm`；
+  - `GET /{task_id}/events`。
+- 所有写接口返回最新 `TaskDetail`，前端无需二次查询。
+- 执行期间使用任务级执行锁（`execution_lock_ttl_seconds`，默认 900 秒）；并发执行返回业务码 `2003`。
+- 运行时异常会落库为 `FAILED` + `RUNTIME_ERROR`，不会让任务停留在不可解释状态。
+- `create_app` 支持注入自定义工作流，便于测试与后续替换 Agent。
+- 恢复人工审核前通过 `NewsroomWorkflow.has_pending_interrupt` 校验待处理中断，避免对已结束的图重复恢复。
+
+**验证结果**
+
+- 全量测试 `163 passed`；
+- 新增 `tests/test_execution_service.py`、`tests/test_api_execution.py`，覆盖执行、重复启动、暂停 / 恢复、执行锁冲突、人工批准 / 退回 / 终止、交付确认（确认与拒绝）、事件查询、参数校验、404 与运行时异常落库。
+
+**当前边界**
+
+- 执行采用同步推进，不创建后台任务；前端需要等待请求返回（默认工作流可能需要数十秒）；
+- 执行锁只防并发，不处理进程崩溃后的锁残留（TTL 到期释放）与重启恢复，C-06 继续；
+- 人工审核恢复依赖进程内 `MemorySaver` 检查点，服务重启后无法恢复（C-06）；
+- 接口失败重试计数（C-04）尚未接入执行日志与任务详情；
+- 演示控制台仍使用 `/api/news/demo` 接口，后续切换到 `/tasks`；
+- SSE 实时进度未实现。

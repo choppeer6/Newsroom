@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     max_revision_rounds: int = Field(default=2, ge=0)
     max_interface_retries: int = Field(default=2, ge=0)
     max_concurrent_tasks: int = Field(default=10, ge=1)
+    execution_lock_ttl_seconds: int = Field(default=900, ge=30)
 
     @field_validator("llm_api_key", "search_api_key", mode="before")
     @classmethod
