@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.core.retries import LLM_INTERFACE, consume_retry
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,11 @@ class OpenAICompatibleClient:
                         retryable=True,
                     )
                     if attempt + 1 < _MAX_ATTEMPTS:
+                        if not consume_retry(LLM_INTERFACE):
+                            raise LLMError(
+                                "INTERFACE_RETRY_EXCEEDED",
+                                f"LLM 接口失败重试已达上限：{last_error.message}",
+                            ) from exc
                         continue
                     raise last_error from exc
 
@@ -122,6 +128,11 @@ class OpenAICompatibleClient:
                         or response.status_code >= 500,
                     )
                     if last_error.retryable and attempt + 1 < _MAX_ATTEMPTS:
+                        if not consume_retry(LLM_INTERFACE):
+                            raise LLMError(
+                                "INTERFACE_RETRY_EXCEEDED",
+                                f"LLM 接口失败重试已达上限：{last_error.message}",
+                            )
                         continue
                     raise last_error
 

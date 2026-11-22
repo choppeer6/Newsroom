@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from app.core.config import get_settings
+from app.core.retries import InterfaceRetryTracker, reset_tracker, set_tracker
 from app.graph import routing
 from app.graph.nodes import WorkflowAgents, create_default_agents, make_nodes
 from app.graph.state import NewsTaskState
@@ -39,23 +40,52 @@ def default_checkpointer() -> MemorySaver:
     )
 
 
+def _tracked_node(
+    node: Callable[[NewsTaskState], Awaitable[dict[str, Any]]],
+    limit: int,
+) -> Callable[[NewsTaskState], Awaitable[dict[str, Any]]]:
+    """Bind a per-task retry budget to a node and persist consumed retries."""
+
+    async def wrapped(state: NewsTaskState) -> dict[str, Any]:
+        tracker = InterfaceRetryTracker(
+            limit=limit, counts=dict(state.interface_retry_counts)
+        )
+        token = set_tracker(tracker)
+        try:
+            result = await node(state)
+        finally:
+            reset_tracker(token)
+        if tracker.counts != state.interface_retry_counts:
+            return {**result, "interface_retry_counts": tracker.snapshot()}
+        return result
+
+    return wrapped
+
+
 def build_workflow(
     *,
     agents: WorkflowAgents | None = None,
     checkpointer: MemorySaver | None = None,
     max_revision_rounds: int | None = None,
+    max_interface_retries: int | None = None,
 ):
+    settings = get_settings()
     revision_cap = (
-        get_settings().max_revision_rounds
+        settings.max_revision_rounds
         if max_revision_rounds is None
         else max_revision_rounds
+    )
+    retry_cap = (
+        settings.max_interface_retries
+        if max_interface_retries is None
+        else max_interface_retries
     )
     resolved_agents = agents or create_default_agents()
     nodes = make_nodes(resolved_agents, max_revision_rounds=revision_cap)
 
     builder = StateGraph(NewsTaskState)
     for name, node in nodes.items():
-        builder.add_node(name, node)
+        builder.add_node(name, _tracked_node(node, retry_cap))
 
     builder.add_edge(START, "chief_planning")
     builder.add_conditional_edges(
@@ -145,16 +175,24 @@ class NewsroomWorkflow:
         agents: WorkflowAgents | None = None,
         checkpointer: MemorySaver | None = None,
         max_revision_rounds: int | None = None,
+        max_interface_retries: int | None = None,
     ) -> None:
+        settings = get_settings()
         self.max_revision_rounds = (
-            get_settings().max_revision_rounds
+            settings.max_revision_rounds
             if max_revision_rounds is None
             else max_revision_rounds
+        )
+        self.max_interface_retries = (
+            settings.max_interface_retries
+            if max_interface_retries is None
+            else max_interface_retries
         )
         self._graph = build_workflow(
             agents=agents,
             checkpointer=checkpointer,
             max_revision_rounds=self.max_revision_rounds,
+            max_interface_retries=self.max_interface_retries,
         )
 
     @property

@@ -472,6 +472,31 @@ flowchart TD
 - 后台作业为单进程内 `asyncio.Task`，多副本部署需要改为外部任务队列（课程范围不涉及）；
 - 执行锁只防并发，不处理进程崩溃后的锁残留（TTL 到期释放）与重启恢复，C-06 继续；
 - 人工审核恢复依赖进程内 `MemorySaver` 检查点，服务重启后无法恢复（C-06）；
-- 接口失败重试计数（C-04）尚未接入执行日志与任务详情；
 - 演示控制台仍使用 `/api/news/demo` 接口，后续切换到 `/tasks`；
 - SSE 实时进度未实现。
+
+## 16. C-04 条件分支与接口失败重试（2026-11-22）
+
+**已完成**
+
+- 条件分支已由 `backend/app/graph/routing.py` 覆盖：
+  - 主编 / 人工要求补充资料 → 回 `reporter`，要求修改表述 → 回 `editor`，重大争议 → `human_approval`；
+  - 稿件修改轮次 `revision_round` 达到 `max_revision_rounds` 后强制转人工，与接口重试互不影响。
+- 新增 `backend/app/core/retries.py`，按任务、按接口（`llm` / `search`）累计失败重试：
+  - 节点执行期间通过 `ContextVar` 绑定 `InterfaceRetryTracker`，预算为 `Settings.max_interface_retries`（默认 2）；
+  - 节点包装器 `_tracked_node` 在每个节点执行后将新增计数合并进 `interface_retry_counts`，随检查点持久化。
+- LLM 客户端与搜索工具接入重试预算：
+  - 单次调用对可重试错误最多尝试 2 次；
+  - 预算耗尽且仍失败时不重试，LLM 返回 `INTERFACE_RETRY_EXCEEDED`，搜索返回不可重试的 `SEARCH_FAILED`；
+  - 重试计数与修改轮次分开记录，任务详情通过 `TaskDetail.interface_retry_counts` 返回给前端。
+
+**验证结果**
+
+- 全量测试 `172 passed`；
+- 新增 `tests/test_interface_retries.py`，并在 `test_llm_client.py`、`test_search_tool.py` 中补充重试计数、预算耗尽与计数持久化用例。
+
+**当前边界**
+
+- 预算为任务级静态上限，暂不支持按接口配置不同预算；
+- 重试预算耗尽后任务直接 `FAILED`，不支持从失败节点原地续跑（依赖 C-06 的恢复能力）；
+- `interface_retry_counts` 仅统计客户端自动重试，业务层的检索关键词更换不计入该字段。

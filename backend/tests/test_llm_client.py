@@ -6,6 +6,7 @@ import pytest
 
 from app.core.config import Settings
 from app.core.llm import LLMError, OpenAICompatibleClient
+from app.core.retries import InterfaceRetryTracker, reset_tracker, set_tracker
 
 
 def make_settings(**overrides) -> Settings:
@@ -127,3 +128,55 @@ def test_complete_json_requires_api_key():
 
     assert exc_info.value.code == "LLM_NOT_CONFIGURED"
     assert exc_info.value.retryable is False
+
+
+def test_retry_budget_records_consumed_retries():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, json={"error": "temporary"})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": '{"ok": true}'}}]}
+        )
+
+    client = OpenAICompatibleClient(
+        make_settings(), transport=httpx.MockTransport(handler)
+    )
+    tracker = InterfaceRetryTracker(limit=2)
+    token = set_tracker(tracker)
+    try:
+        result = asyncio.run(client.complete_json(system="system", user="user"))
+    finally:
+        reset_tracker(token)
+
+    assert result == {"ok": True}
+    assert calls == 2
+    assert tracker.snapshot() == {"llm": 1}
+
+
+def test_retry_budget_blocks_retry_when_exhausted():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500, json={"error": "down"})
+
+    client = OpenAICompatibleClient(
+        make_settings(), transport=httpx.MockTransport(handler)
+    )
+    tracker = InterfaceRetryTracker(limit=2, counts={"llm": 2})
+    token = set_tracker(tracker)
+    try:
+        with pytest.raises(LLMError) as exc_info:
+            asyncio.run(client.complete_json(system="system", user="user"))
+    finally:
+        reset_tracker(token)
+
+    assert exc_info.value.code == "INTERFACE_RETRY_EXCEEDED"
+    assert exc_info.value.retryable is False
+    assert calls == 1
+    assert tracker.snapshot() == {"llm": 2}

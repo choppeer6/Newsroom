@@ -142,6 +142,7 @@
   "current_stage": "human_review",
   "paused": false,
   "revision_round": 0,
+  "interface_retry_counts": {},
   "article_version": 2,
   "latest_fact_check": { "overall_result": "PARTIAL", "report_id": "RPT_001" },
   "latest_special_check": { "result": "PASSED", "report_id": "SC_001" },
@@ -169,6 +170,7 @@
   "current_stage": "human_review",
   "paused": false,
   "revision_round": 0,
+  "interface_retry_counts": { "llm": 1 },
   "article_version": 2,
   "latest_fact_check": { "overall_result": "PASSED", "report_id": "FC_0001", "article_version": 2 },
   "latest_special_check": { "result": "PASSED", "report_id": "SC_0001", "article_version": 2 },
@@ -473,10 +475,10 @@
 | `GET` | `/api/news/tasks` | 已实现 | 支持 `status`、`keyword`、`page`、`page_size` |
 | `GET` | `/api/news/tasks/{task_id}` | 已实现 | 返回任务摘要、当前阶段、修改轮次、核查 / 专项检查摘要与交付材料摘要 |
 | `POST` | `/api/news/tasks/{task_id}/cancel` | 已实现 | 已交付或已终止任务返回 `2002`；终止后状态为 `TERMINATED` |
-| `POST` | `/api/news/tasks/{task_id}/execute` | 已实现 | 同步执行到暂停点，返回最新 `TaskDetail`；执行锁冲突返回 `2003` |
+| `POST` | `/api/news/tasks/{task_id}/execute` | 已实现 | 返回 `202` 并在后台执行到暂停点，返回最新 `TaskDetail`；执行锁冲突返回 `2003` |
 | `POST` | `/api/news/tasks/{task_id}/pause` | 已实现 | 暂停 `CREATED` / `RUNNING` 任务 |
-| `POST` | `/api/news/tasks/{task_id}/resume` | 已实现 | 清除暂停并同步执行 |
-| `POST` | `/api/news/tasks/{task_id}/human-review` | 已实现 | 人工批准 / 退回 / 终止，返回最新 `TaskDetail` |
+| `POST` | `/api/news/tasks/{task_id}/resume` | 已实现 | 清除暂停并返回 `202`，后台从检查点继续执行 |
+| `POST` | `/api/news/tasks/{task_id}/human-review` | 已实现 | 人工批准 / 退回 / 终止，返回 `202` 与最新 `TaskDetail` |
 | `GET` | `/api/news/tasks/{task_id}/delivery` | 已实现 | 返回完整交付材料包 |
 | `POST` | `/api/news/tasks/{task_id}/delivery/confirm` | 已实现 | 确认交付置为 `DELIVERED`，拒绝时保持 `PENDING_REVIEW` |
 | `GET` | `/api/news/tasks/{task_id}/events` | 已实现 | 返回 Agent 执行事件列表 |
@@ -486,7 +488,7 @@
 | `POST` | `/api/news/demo/tasks/{task_id}/review` | 演示 | 提交人工审核结论并恢复工作流 |
 | `POST` | `/api/news/demo/tasks/{task_id}/confirm` | 演示 | 待复核阶段确认交付（`DELIVERED`）或暂不交付 |
 
-`TaskDetail` 字段：`paused`、`revision_round`、`article_version`、`latest_fact_check`、`latest_special_check`、`delivery`、`error`。
+`TaskDetail` 字段：`paused`、`revision_round`、`interface_retry_counts`、`article_version`、`latest_fact_check`、`latest_special_check`、`delivery`、`error`。`interface_retry_counts` 按接口（`llm` / `search`）累计本任务已消耗的失败重试次数，与 `revision_round` 相互独立。
 
 C-05 已补齐执行、暂停、恢复、人工审核、交付确认与执行事件接口。演示接口暂保留用于联调页；后续可切换到 `/tasks` 接口。SSE 实时进度未实现。
 
@@ -497,6 +499,12 @@ C-05 已补齐执行、暂停、恢复、人工审核、交付确认与执行事
 - 暂停在节点边界生效：当前节点完成后停止，已完成节点保留在检查点中，恢复时从检查点继续；
 - 执行异常会被记录为 `FAILED` + `RUNTIME_ERROR` 并持久化；人工审核恢复需要进程内检查点存在（重启恢复在 C-06 实现）；
 - 前端通过 `GET /tasks/{id}` 轮询 `status` 与 `current_stage`，通过 `GET /tasks/{id}/events` 查看已落库的执行事件。
+
+接口失败重试约定：
+
+- LLM 与搜索接口单次调用最多重试 1 次；每个任务的每个接口另有独立重试预算（`Settings.max_interface_retries`，默认 2），预算耗尽后不再重试；
+- 预算耗尽且接口仍失败时，节点返回 `INTERFACE_RETRY_EXCEEDED`（搜索为 `SEARCH_FAILED`），任务置 `FAILED` 并记录错误；
+- 已消耗的重试次数写入 `interface_retry_counts`，随任务详情返回，便于前端提示；修改轮次 `revision_round` 不受影响。
 
 ### 11.2 已实现的通用约定
 

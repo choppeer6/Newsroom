@@ -242,7 +242,12 @@ def route_after_human_approval(state: NewsTaskState) -> str:
 
 ### 6.1 模型调用异常
 
-例如 API 超时、请求失败和速率限制。系统应进行有限次数重试；超过重试次数后暂停当前任务，并记录错误信息。
+例如 API 超时、请求失败和速率限制。系统应进行有限次数重试；超过重试次数后停止推进并记录错误信息。
+
+- 单次调用：LLM 与搜索接口对可重试错误最多重试 1 次；
+- 任务预算：每个任务的每个接口另有独立预算 `Settings.max_interface_retries`（默认 2），由 `InterfaceRetryTracker` 在节点执行期间累计并写入 `interface_retry_counts`；
+- 预算耗尽：接口仍失败时不再重试，节点失败，任务置 `FAILED` 并记录 `INTERFACE_RETRY_EXCEEDED`（搜索统一为 `SEARCH_FAILED`）；
+- 该计数与稿件修改轮次 `revision_round` 完全独立，不共享上限。
 
 ### 6.2 工具调用异常
 
@@ -416,7 +421,8 @@ result = await workflow.resume("TASK_001", {"decision": "APPROVE", "comments": "
 - 2026-11-14（第 3 周）：自动化测试 120 项通过，真实 DeepSeek + Tavily 冒烟到达 `PUBLISHED`（旧发布链，已按分工文档废弃）。
 - 2026-11-22（第 4 周）：全量测试 163 项通过；正常链路到达 `PENDING_REVIEW` 并生成交付材料包；修改轮次、硬阻断、人工终止、失败节点等分支均有覆盖。
 - 2026-11-22（C-05）：执行服务与接口测试覆盖后台执行、暂停 / 恢复、人工批准 / 退回 / 终止、交付确认、执行事件、执行锁冲突与运行时异常落库。
-- 尚未覆盖：接口失败重试独立计数（C-04）、进程重启恢复与重复启动防护（C-06）、真实专项检查规则、SSE 实时进度。
+- 2026-11-22（C-04）：条件分支（证据不足回记者、表述问题回编辑、争议转人工）已覆盖；接口失败重试按接口独立计数并以 `max_interface_retries` 设限，重试预算耗尽后任务失败，计数随任务详情返回。
+- 尚未覆盖：进程重启恢复与重复启动防护（C-06）、真实专项检查规则、SSE 实时进度。
 
 ### 10.6 执行服务（C-05）
 
@@ -427,5 +433,6 @@ result = await workflow.resume("TASK_001", {"decision": "APPROVE", "comments": "
 | 执行锁 TTL | `Settings.execution_lock_ttl_seconds` | 默认 900 秒，防止并发执行同一任务 |
 | 检查点状态 | `NewsroomWorkflow.has_next_step / has_pending_interrupt` | 恢复前确认检查点可续跑、人工恢复确认存在待处理中断 |
 | 后台作业 | `ExecutionJob` | 记录当前任务句柄、最新状态与暂停标记；运行结束或异常后释放并删除 |
+| 接口重试预算 | `app/core/retries.py`、`Settings.max_interface_retries` | 节点级上下文累计 LLM / 搜索重试次数，预算耗尽后停止重试；计数写入 `interface_retry_counts` |
 
 写接口统一返回最新 `TaskDetail`，便于前端一次拿到执行结果；异常约定：状态不允许 `2002`，执行锁占用 `2003`，参数错误 `1001`，任务不存在 `2001`。

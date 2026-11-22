@@ -122,6 +122,7 @@ class TaskDetail(TaskSummary):
     requirements: TaskRequirements
     paused: bool
     revision_round: int
+    interface_retry_counts: dict[str, int] = Field(default_factory=dict)
     article_version: int | None
     latest_fact_check: FactCheckSummary | None
     latest_special_check: SpecialCheckSummary | None
@@ -144,6 +145,7 @@ class TaskDetail(TaskSummary):
             requirements=state.requirements,
             paused=state.paused,
             revision_round=state.revision_round,
+            interface_retry_counts=dict(state.interface_retry_counts),
             article_version=state.article_version,
             latest_fact_check=(
                 FactCheckSummary(

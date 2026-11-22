@@ -9,10 +9,12 @@ from typing import Any, Protocol
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.core.retries import SEARCH_INTERFACE, consume_retry
 
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 _MAX_SUMMARY_CHARS = 600
 _MAX_TITLE_CHARS = 300
+_MAX_ATTEMPTS = 2
 
 
 class SearchError(RuntimeError):
@@ -74,23 +76,39 @@ class TavilySearchTool:
             "include_raw_content": False,
         }
         # trust_env=False keeps a malformed local HTTP_PROXY from breaking API calls.
+        last_error: SearchError | None = None
+        response: httpx.Response | None = None
         async with httpx.AsyncClient(
             timeout=self._timeout,
             transport=self._transport,
             trust_env=False,
         ) as client:
-            try:
-                response = await client.post(TAVILY_ENDPOINT, json=payload)
-            except httpx.HTTPError as exc:
-                raise SearchError(
-                    f"搜索服务请求失败：{type(exc).__name__}", retryable=True
-                ) from exc
+            for attempt in range(_MAX_ATTEMPTS):
+                try:
+                    response = await client.post(TAVILY_ENDPOINT, json=payload)
+                except httpx.HTTPError as exc:
+                    last_error = SearchError(
+                        f"搜索服务请求失败：{type(exc).__name__}", retryable=True
+                    )
+                else:
+                    if response.status_code < 400:
+                        break
+                    last_error = SearchError(
+                        f"搜索服务返回 HTTP {response.status_code}",
+                        retryable=response.status_code == 429
+                        or response.status_code >= 500,
+                    )
+                if last_error.retryable and attempt + 1 < _MAX_ATTEMPTS:
+                    if not consume_retry(SEARCH_INTERFACE):
+                        raise SearchError(
+                            f"搜索接口失败重试已达上限：{last_error.message}",
+                            retryable=False,
+                        )
+                    continue
+                raise last_error
 
-        if response.status_code >= 400:
-            raise SearchError(
-                f"搜索服务返回 HTTP {response.status_code}",
-                retryable=response.status_code == 429 or response.status_code >= 500,
-            )
+        if response is None:
+            raise SearchError("搜索服务未返回响应", retryable=False)
 
         try:
             body = response.json()
