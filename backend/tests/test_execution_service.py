@@ -5,7 +5,7 @@ import pytest
 from app.core.errors import BusyError, ConflictError, NotFoundError
 from app.graph.nodes import create_default_agents
 from app.graph.workflow import NewsroomWorkflow
-from app.schemas.domain import TaskRequirements
+from app.schemas.domain import ArticleContent, TaskRequirements
 from app.schemas.enums import HumanDecision, TaskStatus, WorkflowStage
 from app.services.execution_service import ExecutionService
 from app.services.task_service import TaskService
@@ -393,3 +393,180 @@ def test_execute_marks_task_failed_on_runtime_error():
     assert failed.current_stage == WorkflowStage.ERROR
     assert failed.error is not None
     assert failed.error.code == "RUNTIME_ERROR"
+
+
+def test_manual_edit_reruns_checks_and_rebinds_reports():
+    service, tasks, _ = build_service(
+        [*HAPPY_RESPONSES, EXTRACT, VERIFY, APPROVE]
+    )
+
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        first = await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
+        old_reports = (
+            first.fact_check_report.report_id,
+            first.special_check_report.report_id,
+        )
+        await service.submit_manual_edit(
+            created.task_id,
+            article=ArticleContent(
+                title="人工修订后的标题",
+                content="人工编辑后的正文内容，需要重新核查与审核。",
+            ),
+            version=3,
+        )
+        updated = await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
+        return first, updated, old_reports
+
+    first, updated, old_reports = asyncio.run(scenario())
+
+    assert first.article_version == 2
+    assert updated.article_version == 3
+    assert updated.current_stage == WorkflowStage.PENDING_REVIEW
+    assert updated.edited_article.title == "人工修订后的标题"
+    assert updated.fact_check_report.article_version == 3
+    assert updated.special_check_report.article_version == 3
+    new_reports = (
+        updated.fact_check_report.report_id,
+        updated.special_check_report.report_id,
+    )
+    assert new_reports != old_reports
+    package = updated.delivery_package
+    assert package is not None
+    assert package.article_version == 3
+    assert package.fact_check_report_id == new_reports[0]
+    assert package.special_check_report_id == new_reports[1]
+    agents = [entry.agent_name.value for entry in updated.execution_logs]
+    assert agents.count("fact_checker") == 2
+    assert agents.count("special_checker") == 2
+
+
+def test_manual_edit_from_human_review_discards_pending_interrupt():
+    service, tasks, _ = build_service(
+        [*HUMAN_RESPONSES, EXTRACT, VERIFY, APPROVE]
+    )
+
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.HUMAN_REVIEW)
+        await service.submit_manual_edit(
+            created.task_id,
+            article=ArticleContent(
+                title="人工裁决后的标题",
+                content="人工审核时修改的正文，需要重新走核查与主编审核。",
+            ),
+            version=3,
+        )
+        finished = await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
+        pending = await service.workflow.has_pending_interrupt(created.task_id)
+        return finished, pending
+
+    finished, pending = asyncio.run(scenario())
+
+    assert finished.article_version == 3
+    assert finished.human_decision is None
+    assert finished.fact_check_report.article_version == 3
+    assert pending is False
+
+
+def test_manual_edit_rejects_stale_or_non_review_states():
+    service, tasks, _ = build_service()
+
+    async def scenario():
+        created = await create_task(tasks)
+        with pytest.raises(ConflictError, match="可编辑环节"):
+            await service.submit_manual_edit(
+                created.task_id,
+                article=ArticleContent(title="标题", content="正文"),
+                version=1,
+            )
+
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.PENDING_REVIEW)
+        with pytest.raises(ConflictError, match="必须大于当前版本"):
+            await service.submit_manual_edit(
+                created.task_id,
+                article=ArticleContent(title="标题", content="正文"),
+                version=2,
+            )
+
+    asyncio.run(scenario())
+
+
+def test_recover_stale_tasks_marks_orphaned_running_failed():
+    service, tasks, _ = build_service(slow=True)
+
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        live = await service.recover_stale_tasks()
+        assert live == 0
+        await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW, timeout=10
+        )
+
+        orphan = await create_task(tasks)
+        state = await tasks.get_task(orphan.task_id)
+        state.task_status = TaskStatus.RUNNING
+        state.current_stage = WorkflowStage.RESEARCH
+        state.paused = True
+        await tasks.save_state(state)
+
+        recovered = await service.recover_stale_tasks()
+        stale = await tasks.get_task(orphan.task_id)
+        return recovered, stale
+
+    recovered, stale = asyncio.run(scenario())
+
+    assert recovered == 1
+    assert stale.task_status == TaskStatus.FAILED
+    assert stale.current_stage == WorkflowStage.ERROR
+    assert stale.paused is False
+    assert stale.error is not None
+    assert stale.error.code == "WORKER_RESTARTED"
+
+
+def test_manual_edit_rebuilds_checkpoint_after_restart():
+    service, tasks, _ = build_service([*HAPPY_RESPONSES])
+
+    async def scenario():
+        created = await create_task(tasks)
+        await service.execute(created.task_id)
+        await wait_for_status(tasks, created.task_id, TaskStatus.PENDING_REVIEW)
+
+        # A fresh workflow has an empty MemorySaver, like a restarted process.
+        restarted = ExecutionService(
+            tasks,
+            workflow=NewsroomWorkflow(
+                agents=create_default_agents(
+                    llm=FakeLLM([EXTRACT, VERIFY, APPROVE]),
+                    search=FakeSearch(default=[make_hit()]),
+                )
+            ),
+        )
+        await restarted.submit_manual_edit(
+            created.task_id,
+            article=ArticleContent(
+                title="重启后人工修订",
+                content="服务重启后人工保存的新版本，需要重新核查。",
+            ),
+            version=3,
+        )
+        return await wait_for_status(
+            tasks, created.task_id, TaskStatus.PENDING_REVIEW
+        )
+
+    finished = asyncio.run(scenario())
+
+    assert finished.article_version == 3
+    assert finished.fact_check_report.article_version == 3
+    assert finished.special_check_report.article_version == 3
+    assert finished.delivery_package.article_version == 3

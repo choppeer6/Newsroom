@@ -266,7 +266,9 @@ def route_after_human_approval(state: NewsTaskState) -> str:
 - 停在 `human_approval` 阶段的任务，必须通过人工接口恢复；恢复前校验检查点存在待处理的中断；
 - `PENDING_REVIEW` 阶段不再恢复图，由执行服务更新交付 / 终止状态；
 - 暂停采用**节点边界生效**：`pause` 只置暂停标记，正在运行的任务在下一个节点边界停止，状态保存为 `RUNNING + paused`；`resume` 从检查点续跑（`payload=None`），暂停尚未生效时返回 `2003` 提示重试；
-- 任务失败或服务重启后的检查点恢复仍待 C-06 实现；`MemorySaver` 不跨进程保留；
+- 人工编辑产生新版本时，执行服务通过 `stream_recheck` 以 `as_node="editor"` 更新检查点并从 `fact_checker` 重新执行，清空旧核查 / 专项检查 / 交付材料，新报告与审核结论绑定新版本；
+- `MemorySaver` 不跨进程保留；服务启动时 `recover_stale_tasks` 把没有活动作业的 `RUNNING` 任务置为 `FAILED`（错误码 `WORKER_RESTARTED`），避免任务永久悬挂；
+- 同一任务通过执行锁与后台作业表双重防重：已有作业时再次启动返回 `2003`，`CREATED` 之外的状态拒绝执行；
 - 恢复时不得重复执行已完成节点（幂等：来源按 URL 去重、稿件版本按 `(article_id, version)` 唯一）。
 
 ---
@@ -422,7 +424,8 @@ result = await workflow.resume("TASK_001", {"decision": "APPROVE", "comments": "
 - 2026-11-22（第 4 周）：全量测试 163 项通过；正常链路到达 `PENDING_REVIEW` 并生成交付材料包；修改轮次、硬阻断、人工终止、失败节点等分支均有覆盖。
 - 2026-11-22（C-05）：执行服务与接口测试覆盖后台执行、暂停 / 恢复、人工批准 / 退回 / 终止、交付确认、执行事件、执行锁冲突与运行时异常落库。
 - 2026-11-22（C-04）：条件分支（证据不足回记者、表述问题回编辑、争议转人工）已覆盖；接口失败重试按接口独立计数并以 `max_interface_retries` 设限，重试预算耗尽后任务失败，计数随任务详情返回。
-- 尚未覆盖：进程重启恢复与重复启动防护（C-06）、真实专项检查规则、SSE 实时进度。
+- 2026-11-22（C-06）：人工编辑新版本从 `fact_checker` 重跑并重新绑定报告；人工处理后从检查点续跑；执行锁 + 作业表防重复启动；服务启动时将遗留的 `RUNNING` 任务标记为 `FAILED / WORKER_RESTARTED`。
+- 尚未覆盖：真实专项检查规则、SSE 实时进度、持久化 Checkpointer（重启后人工编辑仍可重跑，但进行中的检查点无法恢复）。
 
 ### 10.6 执行服务（C-05）
 
@@ -434,5 +437,7 @@ result = await workflow.resume("TASK_001", {"decision": "APPROVE", "comments": "
 | 检查点状态 | `NewsroomWorkflow.has_next_step / has_pending_interrupt` | 恢复前确认检查点可续跑、人工恢复确认存在待处理中断 |
 | 后台作业 | `ExecutionJob` | 记录当前任务句柄、最新状态与暂停标记；运行结束或异常后释放并删除 |
 | 接口重试预算 | `app/core/retries.py`、`Settings.max_interface_retries` | 节点级上下文累计 LLM / 搜索重试次数，预算耗尽后停止重试；计数写入 `interface_retry_counts` |
+| 新版本重查 | `ExecutionService.submit_manual_edit`、`NewsroomWorkflow.stream_recheck` | 人工编辑后清空旧报告，从 `fact_checker` 重新执行并绑定新版本 |
+| 启动恢复 | `ExecutionService.recover_stale_tasks` | 启动时把没有活动作业的 `RUNNING` 任务标记为 `FAILED / WORKER_RESTARTED` |
 
 写接口统一返回最新 `TaskDetail`，便于前端一次拿到执行结果；异常约定：状态不允许 `2002`，执行锁占用 `2003`，参数错误 `1001`，任务不存在 `2001`。

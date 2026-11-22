@@ -69,6 +69,9 @@ class TaskService:
         await self.get_task(task_id)
         return await self._store.list_events(task_id)
 
+    async def list_all(self) -> list[NewsTaskState]:
+        return await self._store.list_all()
+
     async def save_state(self, state: NewsTaskState) -> None:
         await self._store.update(state)
 

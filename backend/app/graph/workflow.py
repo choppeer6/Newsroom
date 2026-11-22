@@ -246,3 +246,14 @@ class NewsroomWorkflow:
             payload, self._config(task_id), stream_mode="values"
         ):
             yield chunk
+
+    async def stream_recheck(
+        self, task_id: str, values: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Restart at fact_check for a new article version, skipping planning/writing."""
+        config = self._config(task_id)
+        await self._graph.aupdate_state(config, values, as_node="editor")
+        async for chunk in self._graph.astream(
+            None, config, stream_mode="values"
+        ):
+            yield chunk

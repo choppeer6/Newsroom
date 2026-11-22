@@ -13,7 +13,7 @@ from app.core.errors import BusyError, ConflictError
 from app.core.utils import generate_id
 from app.graph.state import NewsTaskState
 from app.graph.workflow import NewsroomWorkflow, state_from_values
-from app.schemas.domain import DeliveryPackage, ErrorInfo, ExecutionLogEntry
+from app.schemas.domain import ArticleContent, DeliveryPackage, ErrorInfo, ExecutionLogEntry
 from app.schemas.enums import HumanDecision, TaskStatus, WorkflowStage
 from app.services.task_service import TaskService
 
@@ -166,6 +166,67 @@ class ExecutionService:
             lambda: self.workflow.stream_continue(task_id, payload),
         )
         return state
+
+    async def submit_manual_edit(
+        self,
+        task_id: str,
+        *,
+        article: ArticleContent,
+        version: int,
+    ) -> NewsTaskState:
+        state = await self._tasks.get_task(task_id)
+        await self._ensure_idle(task_id, wait=True)
+        if state.task_status not in {TaskStatus.HUMAN_REVIEW, TaskStatus.PENDING_REVIEW}:
+            raise ConflictError("当前任务不在可编辑环节")
+        current_version = state.article_version or 0
+        if version <= current_version:
+            raise ConflictError(f"新版本号必须大于当前版本 {current_version}")
+
+        token = await self._acquire(task_id)
+        state.edited_article = article
+        state.article_id = state.article_id or generate_id("ART")
+        state.article_version = version
+        state.fact_check_report = None
+        state.special_check_report = None
+        state.chief_decision = None
+        state.review_comments = None
+        state.human_decision = None
+        state.revision_request = None
+        state.delivery_package = None
+        state.task_status = TaskStatus.RUNNING
+        state.current_stage = WorkflowStage.FACT_CHECK
+        state.paused = False
+        state.error = None
+        state.touch()
+        await self._tasks.save_state(state)
+
+        # Full state keeps the recheck self-contained: after a restart the
+        # in-memory checkpoint is gone and aupdate_state starts from this payload.
+        values = state.model_dump(mode="json")
+        self._start_job(
+            state,
+            token,
+            lambda: self.workflow.stream_recheck(task_id, values),
+        )
+        return state
+
+    async def recover_stale_tasks(self) -> int:
+        """Fail tasks left RUNNING by a previous process; checkpoints are in-memory."""
+        recovered = 0
+        for state in await self._tasks.list_all():
+            if state.task_status != TaskStatus.RUNNING or self.is_running(state.task_id):
+                continue
+            state.task_status = TaskStatus.FAILED
+            state.current_stage = WorkflowStage.ERROR
+            state.paused = False
+            state.error = ErrorInfo(
+                code="WORKER_RESTARTED",
+                message="服务重启后执行检查点已丢失，任务已停止",
+            )
+            state.touch()
+            await self._tasks.save_state(state)
+            recovered += 1
+        return recovered
 
     async def get_delivery(self, task_id: str) -> DeliveryPackage:
         state = await self._tasks.get_task(task_id)

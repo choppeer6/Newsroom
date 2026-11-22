@@ -78,6 +78,9 @@ def create_app(
             application.state.task_service,
             workflow=workflow,
         )
+        recovered = await application.state.execution_service.recover_stale_tasks()
+        if recovered:
+            logger.warning("marked %d orphaned RUNNING tasks as FAILED", recovered)
         try:
             yield
         finally:
