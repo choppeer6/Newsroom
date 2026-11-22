@@ -370,3 +370,30 @@ flowchart TD
 - MySQL 持久化、持久化 Checkpointer 与进程重启恢复（第 4 周）；
 - 工作流执行 API（创建任务后触发、人工审核恢复、发布确认恢复）与并发控制（第 4 ~ 5 周）；
 - 前端页面与真实发布通道（第 5 周）。
+
+---
+
+## 13. C-01 数据库基础落地（2026-11-22）
+
+**已完成**
+
+- 新增 SQLAlchemy 异步数据库层：`app/db/base.py`、`app/db/session.py`、`app/db/task_store.py`；
+- 新增任务表与执行事件表模型：`tasks`、`execution_events`；任务状态与当前阶段分别存列，完整状态快照存 `state_json`；
+- 任务存储支持内存与数据库两种实现，API 默认走数据库；测试默认使用内存存储，另加临时 SQLite 数据库测试；
+- 执行事件按 `task_id + seq` 顺序落库，任务更新时从 `execution_logs` 增量同步；
+- 增加任务级执行锁 `try_acquire_lock / release_lock`，为 C-06 防重复启动预留；
+- 配置增加 `database_echo`、`max_interface_retries`；本地默认数据库改为 `sqlite+aiosqlite:///./newsroom.db`，MySQL 仍可通过 `DATABASE_URL` 切换；
+- `requirements.txt` 增加 `sqlalchemy[asyncio]` 与 `aiosqlite`；
+- 新增 `tests/test_db_store.py`，覆盖任务持久化、事件顺序、执行锁、API 落库与重启后查询。
+
+**验证结果**
+
+- 全量测试 `134 passed`；
+- 同一 SQLite 文件关闭应用后重新启动，任务仍可查询；
+- 同一任务第二次获取执行锁失败，释放后可再次获取。
+
+**当前边界**
+
+- 本轮只落 C 的任务与执行事件，没有改任务状态枚举和工作流末段；
+- 稿件版本、来源/核查/专项检查报告仍由 B、D 各自建表；
+- 下一阶段：按分工文档将任务状态改为“运行、待人工处理、待复核、已交付、失败、终止”，并把发布链换成专项检查、主编决策与预发布准备链。

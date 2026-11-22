@@ -6,3 +6,5 @@ httpx>=0.28,<1.0
 PyYAML>=6.0,<7.0
 Jinja2>=3.1,<4.0
 langgraph>=1.0,<2.0
+sqlalchemy[asyncio]>=2.0,<3.0
+aiosqlite>=0.20,<1.0

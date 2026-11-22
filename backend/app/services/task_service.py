@@ -1,13 +1,13 @@
 from app.core.errors import ConflictError, NotFoundError
 from app.core.utils import generate_id
 from app.graph.state import NewsTaskState
-from app.schemas.domain import TaskRequirements
+from app.schemas.domain import ExecutionLogEntry, TaskRequirements
 from app.schemas.enums import TaskStatus, WorkflowStage
-from app.services.task_store import InMemoryTaskStore
+from app.services.task_store import TaskStore
 
 
 class TaskService:
-    def __init__(self, store: InMemoryTaskStore) -> None:
+    def __init__(self, store: TaskStore) -> None:
         self._store = store
 
     async def create_task(
@@ -64,3 +64,20 @@ class TaskService:
         state.touch()
         await self._store.update(state)
         return state
+
+    async def list_events(self, task_id: str) -> list[ExecutionLogEntry]:
+        await self.get_task(task_id)
+        return await self._store.list_events(task_id)
+
+    async def save_state(self, state: NewsTaskState) -> None:
+        await self._store.update(state)
+
+    async def try_acquire_lock(
+        self, task_id: str, token: str, *, ttl_seconds: int = 60
+    ) -> bool:
+        return await self._store.try_acquire_lock(
+            task_id, token, ttl_seconds=ttl_seconds
+        )
+
+    async def release_lock(self, task_id: str, token: str) -> None:
+        await self._store.release_lock(task_id, token)
