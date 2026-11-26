@@ -4,34 +4,29 @@ from enum import StrEnum
 
 class TaskStatus(StrEnum):
     CREATED = "CREATED"
-    PLANNING = "PLANNING"
-    RESEARCHING = "RESEARCHING"
-    WRITING = "WRITING"
-    EDITING = "EDITING"
-    FACT_CHECKING = "FACT_CHECKING"
-    REVIEWING = "REVIEWING"
+    RUNNING = "RUNNING"
     HUMAN_REVIEW = "HUMAN_REVIEW"
-    PENDING_PUBLISH = "PENDING_PUBLISH"
-    PUBLISHED = "PUBLISHED"
-    REVISION_REQUIRED = "REVISION_REQUIRED"
+    PENDING_REVIEW = "PENDING_REVIEW"
+    DELIVERED = "DELIVERED"
     FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
+    TERMINATED = "TERMINATED"
 
 
 class WorkflowStage(StrEnum):
     CREATED = "created"
     CHIEF_PLANNING = "chief_planning"
     RESEARCH = "research"
-    WRITING = "writing"
     EDITING = "editing"
     FACT_CHECK = "fact_check"
+    SPECIAL_CHECK = "special_check"
     CHIEF_REVIEW = "chief_review"
     REVISION_REQUIRED = "revision_required"
-    HUMAN_APPROVAL = "human_approval"
-    PENDING_PUBLISH = "pending_publish"
-    PUBLISHED = "published"
+    HUMAN_REVIEW = "human_review"
+    PREPARE_DELIVERY = "prepare_delivery"
+    PENDING_REVIEW = "pending_review"
+    DELIVERED = "delivered"
     ERROR = "error"
-    CANCELLED = "cancelled"
+    TERMINATED = "terminated"
 
 
 class ChiefDecision(StrEnum):
@@ -53,6 +48,8 @@ class AgentName(StrEnum):
     REPORTER = "reporter"
     EDITOR = "editor"
     FACT_CHECKER = "fact_checker"
+    SPECIAL_CHECKER = "special_checker"
+    DELIVERY_PREPARER = "delivery_preparer"
     PUBLISHER = "publisher"
 
 
@@ -74,6 +71,18 @@ class FactCheckOverallResult(StrEnum):
     PASSED = "PASSED"
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
+
+
+class SpecialCheckResult(StrEnum):
+    PASSED = "PASSED"
+    WARNING = "WARNING"
+    BLOCKED = "BLOCKED"
+
+
+class SpecialCheckSeverity(StrEnum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    BLOCKING = "BLOCKING"
 
 
 class PublicationStatus(StrEnum):

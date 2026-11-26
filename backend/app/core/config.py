@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/news"
     cors_origins: list[str] = ["http://localhost:5173"]
 
-    database_url: str = "mysql+asyncmy://newsroom:newsroom@localhost:3306/newsroom"
+    database_url: str = "sqlite+aiosqlite:///./newsroom.db"
+    database_echo: bool = False
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: SecretStr | None = None
     llm_model: str = "gpt-4o"
@@ -25,7 +26,9 @@ class Settings(BaseSettings):
     search_api_key: SecretStr | None = None
 
     max_revision_rounds: int = Field(default=2, ge=0)
+    max_interface_retries: int = Field(default=2, ge=0)
     max_concurrent_tasks: int = Field(default=10, ge=1)
+    execution_lock_ttl_seconds: int = Field(default=900, ge=30)
 
     @field_validator("llm_api_key", "search_api_key", mode="before")
     @classmethod

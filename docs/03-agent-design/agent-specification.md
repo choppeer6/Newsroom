@@ -20,13 +20,17 @@
 
 每个 Agent 负责一个或多个明确的业务环节，并通过 LangGraph 工作流进行协同。Agent 之间**不采用完全自由的对话模式**，而是通过结构化输入输出和统一的任务状态进行信息传递。
 
-系统包含五个核心 Agent：
+系统包含五个核心内容 Agent，以及两个负责交付阶段的辅助 Agent：
 
-1. **Chief Editor Agent**：主编 Agent
+1. **Chief Editor Agent**：主编 Agent（拆分为「规划」「审核」两个工作流节点）
 2. **Reporter Agent**：记者 Agent
 3. **Editor Agent**：编辑 Agent
 4. **Fact Checker Agent**：事实核查 Agent
-5. **Publisher Agent**：审核发布 Agent
+5. **Special Checker Agent**：专项检查 Agent（D 模块接口，当前为确定性占位实现）
+6. **Delivery Preparer Agent**：预发布准备 Agent（D 模块接口，当前为确定性占位实现）
+7. **Publisher Agent**：保留为对外发布交接桩，当前工作流不调用
+
+> 业务口径：系统**不对外发布新闻**。主编审核通过后，由预发布准备 Agent 生成交付包，任务进入「待复核」；用户复核、导出后自行投稿。`Publisher Agent` 的代码与契约保留在仓库中，作为与 B/D 模块的交接桩，不参与当前工作流。
 
 ---
 
@@ -35,21 +39,22 @@
 ```mermaid
 flowchart TD
     U["用户"]
-    C["Chief Editor Agent<br/>主编"]
+    C["Chief Editor Agent<br/>主编：规划 / 审核"]
     R["Reporter Agent<br/>记者"]
     E["Editor Agent<br/>编辑"]
     F["Fact Checker Agent<br/>事实核查"]
-    P["Publisher Agent<br/>审核发布"]
+    S["Special Checker<br/>专项检查（占位）"]
+    D["Delivery Preparer<br/>预发布准备（占位）"]
 
     U --> C
     C --> R
     R --> E
     E --> F
-    F --> C
-    C --> P
-    P --> U
+    F --> S
+    S --> C
+    C --> D
+    D --> U
 
-    F -.核查未通过.-> C
     C -.补充资料.-> R
     C -.修改稿件.-> E
 ```
@@ -58,11 +63,12 @@ flowchart TD
 
 | Agent | 核心产出 | 主要下游 |
 | --- | --- | --- |
-| 主编 | 采编计划、审核决策 | 记者、编辑、人工审核、发布 |
+| 主编 | 采编计划、审核决策 | 记者、编辑、人工审核、预发布准备 |
 | 记者 | 新闻初稿、资料来源 | 编辑 |
 | 编辑 | 编辑稿、编辑说明 | 事实核查 |
-| 事实核查 | 结构化核查报告 | 主编 |
-| 审核发布 | 待发布记录、发布结果 | 用户 |
+| 事实核查 | 结构化核查报告 | 专项检查 |
+| 专项检查 | 专项检查报告（敏感信息、内容规范） | 主编 |
+| 预发布准备 | 交付包（稿件、来源、核查报告） | 用户复核与导出 |
 
 ---
 
@@ -136,18 +142,25 @@ flowchart TD
 
 ### 3.5 审核决策
 
-主编 Agent 在收到事实核查报告和最终稿件后，进行综合判断，支持以下四种决策：
+主编 Agent 在收到事实核查报告、专项检查报告和最终稿件后，进行综合判断，支持以下四种决策：
 
 | 决策 | 含义 | 后续节点 |
 | --- | --- | --- |
-| `APPROVE` | 审核通过 | Publisher Agent |
+| `APPROVE` | 审核通过 | 预发布准备 Agent（任务进入「待复核」） |
 | `REQUEST_EDIT` | 需要编辑修改 | Editor Agent |
 | `REQUEST_RESEARCH` | 需要补充资料 | Reporter Agent |
 | `HUMAN_REVIEW` | 需要人工审核 | 等待人工 |
 
+系统对模型决策设有硬约束：
+
+- 事实核查不是 `PASSED`，或专项检查为 `BLOCKED` 时，`APPROVE` 一律降级为 `HUMAN_REVIEW`；
+- 专项检查为 `WARNING` 时保留 `APPROVE`，但在审核意见中注明提示项；
+- 稿件修改轮次 `revision_round` 达到 `max_revision_rounds` 后，任何退回决策都强制转为 `HUMAN_REVIEW`；
+- 人工审核环节不能覆盖 `FAILED` / `BLOCKED` 结论，只能终止任务或继续留在人工审核。
+
 ### 3.6 权限约束
 
-- 主编负责任务规划和业务决策，**不直接调用新闻发布接口**；
+- 主编负责任务规划和业务决策，**不直接调用新闻发布接口，也不直接生成交付文件**；
 - 不直接承担记者的资料搜索和初稿撰写；
 - 不应自行伪造资料来源；
 - 审核意见必须结构化、可执行。
@@ -380,57 +393,111 @@ flowchart TD
 
 ---
 
-## 7. 审核发布 Agent（Publisher Agent）
+## 7. 专项检查 Agent 与预发布准备 Agent（交付链）
 
-### 7.1 角色定位
+### 7.1 专项检查 Agent（Special Checker Agent）
 
-审核发布 Agent 负责执行主编审核通过后的稿件发布管理工作，连接 AI 审核结果与最终发布操作。
+**角色定位**：在事实核查通过后，对稿件进行敏感信息、内容规范等专项检查，为编辑决策提供最后一道内容风险防线。
 
-### 7.2 核心职责
+**核心职责**：
 
-1. 接收主编审核通过的稿件。
-2. 检查稿件是否满足发布前置条件。
-3. 生成待发布记录。
-4. 等待用户确认。
-5. 调用新闻发布接口。
-6. 保存发布结果。
-7. 处理发布失败和重复提交问题。
+1. 接收与核查报告同版本的稿件；
+2. 检查敏感信息、个人隐私、表述规范等问题；
+3. 输出结构化的专项检查报告（`PASSED` / `WARNING` / `BLOCKED`）；
+4. 将阻断项与提示项交由主编审核环节处理。
 
-### 7.3 输入数据
+**输入数据**：
 
 ```json
 {
   "task_id": "TASK_001",
-  "article": {
-    "title": "最终新闻标题",
-    "content": "最终新闻正文"
-  },
-  "chief_decision": "APPROVE",
-  "fact_check_status": "PASSED",
-  "user_confirmation": false
+  "article_id": "ART_0001",
+  "article": {"title": "新闻标题", "content": "新闻正文"},
+  "article_version": 2,
+  "fact_check_report": {"report_id": "FC_0001", "article_version": 2},
+  "sources": []
 }
 ```
 
-### 7.4 输出数据
+**输出数据**：
 
 ```json
 {
-  "publication": {
-    "status": "PENDING_PUBLISH",
-    "article_id": "ARTICLE_001",
-    "published_at": null,
-    "message": "稿件已进入待发布状态，等待用户确认"
+  "status": "COMPLETED",
+  "finding": {
+    "result": "PASSED",
+    "summary": "未发现内容规范或敏感信息问题。",
+    "issues": []
+  },
+  "article_id": "ART_0001",
+  "article_version": 2
+}
+```
+
+**权限约束**：
+
+- 只能检查，不得修改稿件、修改核查结论或决定是否通过；
+- 输入强制绑定 `fact_check_report.article_id` 与 `article_version`，版本不一致直接拒绝；
+- `BLOCKED` 结论不可被人工覆盖，主编不得据此 `APPROVE`。
+
+> 当前为 D 模块接口的确定性占位实现（恒返回 `PASSED`），后续由专项检查模块替换，契约保持不变。
+
+### 7.2 预发布准备 Agent（Delivery Preparer Agent）
+
+**角色定位**：主编 `APPROVE` 后，汇总稿件、来源与核查报告，生成供用户复核和导出的交付包。系统不对外发布，交付包是工作流的最终产物。
+
+**核心职责**：
+
+1. 校验交付前置条件（审核通过、核查与专项检查结论有效且绑定同一稿件版本）；
+2. 汇总稿件、来源编号、事实核查报告、专项检查报告；
+3. 生成 `DeliveryPackage`，任务状态置为「待复核」（`PENDING_REVIEW`）；
+4. 由用户复核后确认交付（`DELIVERED`）或暂不交付。
+
+**输入数据**：
+
+```json
+{
+  "task_id": "TASK_001",
+  "article_id": "ART_0001",
+  "article": {"title": "新闻标题", "content": "新闻正文"},
+  "article_version": 2,
+  "fact_check_report": {"report_id": "FC_0001", "overall_result": "PASSED"},
+  "special_check_report": {"report_id": "SC_0001", "result": "PASSED"},
+  "sources": [{"source_id": "SRC_0001"}]
+}
+```
+
+**输出数据**：
+
+```json
+{
+  "status": "COMPLETED",
+  "package": {
+    "package_id": "DLV_0001",
+    "task_id": "TASK_001",
+    "article_id": "ART_0001",
+    "article_version": 2,
+    "fact_check_report_id": "FC_0001",
+    "special_check_report_id": "SC_0001",
+    "source_ids": ["SRC_0001"],
+    "prepared_at": "2026-11-22T10:00:00Z",
+    "note": "预发布材料已准备，等待用户复核与导出。"
   }
 }
 ```
 
-### 7.5 权限约束
+**权限约束**：
 
-- 必须验证主编审核状态和事实核查状态；
-- 正式发布必须以**用户明确确认**为前提；
-- 不得因为模型生成了审核通过意见而自动发布；
-- 发布失败时保留稿件并记录错误信息；
-- 重复提交必须幂等。
+- 只有在主编 `APPROVE` 后才会被调用；
+- 事实核查为 `FAILED` 或专项检查为 `BLOCKED` 时拒绝生成交付包；
+- 报告与稿件的 `article_id` / `article_version` 必须一致；
+- **不调用任何新闻发布接口**，最终投稿由用户自行完成。
+
+> 当前为确定性占位实现，交付包字段已按 D 模块需求固化。
+
+### 7.3 审核发布 Agent（Publisher Agent，交接桩）
+
+`Publisher Agent`（`backend/app/agents/publisher.py`、`backend/app/services/publish_service.py`）保留在仓库中，作为与 B/D 模块的对外发布交接桩：输入要求 `chief_decision=APPROVE` 且核查不为 `FAILED`，输出默认 `PENDING_PUBLISH`，不直接发布。当前工作流**不调用**该 Agent，文档 [publisher-agent.md](publisher-agent.md) 仅作为交接参考。
 
 ---
 
@@ -455,15 +522,15 @@ flowchart TD
 | [reporter-agent.md](reporter-agent.md) | 记者工程细化 |
 | [editor-agent.md](editor-agent.md) | 编辑工程细化 |
 | [fact-checker-agent.md](fact-checker-agent.md) | 事实核查工程细化 |
-| [publisher-agent.md](publisher-agent.md) | 审核发布工程细化 |
+| [publisher-agent.md](publisher-agent.md) | 对外发布交接桩（当前工作流不调用） |
 
 发生冲突时，以本文档定义的职责边界与枚举取值为准，详细文档补充实现细节。
 
 ---
 
-## 10. 工程接口契约（V0.2）
+## 10. 工程接口契约（V0.4）
 
-第 1 周已将五个 Agent（主编拆分为「规划」和「审核」两个工作流节点）的输入输出固化为 Pydantic 模型，Agent 实现将在第 2 周基于这些契约开发。
+第 1 周已将各 Agent（主编拆分为「规划」和「审核」两个工作流节点）的输入输出固化为 Pydantic 模型；V0.4 在事实核查之后新增专项检查、在主编审核之后新增预发布准备两个节点契约。
 
 ### 10.1 契约位置
 
@@ -483,7 +550,8 @@ flowchart TD
 | `editor` | `EditorInput` | `EditorOutput` | 成功时必须包含编辑稿、编辑说明和新版本号；版本号 ≥ 2 |
 | `fact_checker` | `FactCheckerInput` | `FactCheckerOutput` | 输入必须带 `article_id` 和 `article_version`；成功输出必须回显两者，用于绑定核查报告 |
 | `chief_review` | `ChiefReviewInput` | `ChiefReviewOutput` | `REQUEST_EDIT` 必须携带 `target=editor` 的修改要求；`REQUEST_RESEARCH` 必须携带 `target=reporter` 的补充资料要求；`APPROVE` 不得携带修改要求 |
-| `publisher` | `PublisherInput` | `PublisherOutput` | 输入要求 `chief_decision=APPROVE` 且核查结果不为 `FAILED`；输出默认 `PENDING_PUBLISH`，不直接发布 |
+| `special_check` | `SpecialCheckInput` | `SpecialCheckOutput` | 输入强制绑定 `fact_check_report.article_id` / `article_version`；成功输出必须回显 `article_id`、`article_version` 与 `finding`；结论为 `PASSED` / `WARNING` / `BLOCKED`，不得修改稿件 |
+| `prepare_delivery` | `DeliveryPreparationInput` | `DeliveryPreparationOutput` | 仅主编 `APPROVE` 后调用；拒绝 `FAILED` 事实核查与 `BLOCKED` 专项检查；报告须与稿件版本一致；输出 `DeliveryPackage`，不调用发布接口 |
 
 ### 10.3 通用约束
 
@@ -491,15 +559,16 @@ flowchart TD
 2. `AgentOutput.status=FAILED` 时必须提供 `error`；`COMPLETED` 时不得携带 `error`。
 3. 成功输出必须包含该 Agent 的核心业务字段；失败输出允许只携带错误信息。
 4. 主编审核的退回要求必须是结构化 `RevisionRequest`，不能只有自然语言描述。
-5. 事实核查只输出证据与结论，不修改稿件、不决定发布；核查报告由工作流绑定到具体稿件版本。
-6. 发布前置条件在契约层校验，但主编 `APPROVE` 仍不等于正式发布，用户确认由发布流程单独处理。
-7. `AGENT_CONTRACTS` 注册了六个节点契约，供工作流注册、测试和后续契约校验复用。
+5. 事实核查只输出证据与结论，不修改稿件、不决定发布；核查报告与专项检查报告均由工作流绑定到具体稿件版本。
+6. 交付前置条件在契约层校验，但主编 `APPROVE` 不等于对外发布：系统只生成交付包并进入「待复核」，导出与投稿由用户完成。
+7. `AGENT_CONTRACTS` 注册了七个工作流节点契约（`chief_planning`、`reporter`、`editor`、`fact_checker`、`special_check`、`chief_review`、`prepare_delivery`），供工作流注册、测试和契约校验复用。`publisher` 契约保留但不在注册表中。
 
 ### 10.4 实现状态
 
 - 第 1 周：完成输入输出契约、枚举、领域模型和契约测试（已完成）；
 - 第 2 周：完成 Reporter、Editor、Fact Checker 的具体逻辑、Prompt 与测试（已完成）；
-- 第 3 周：实现 Chief Editor（规划 / 审核）、Publisher，并接入 LangGraph；工作流负责状态更新、条件路由、退回循环、人工审核与发布确认（已完成）。
+- 第 3 周：实现 Chief Editor（规划 / 审核）、Publisher，并接入 LangGraph；工作流负责状态更新、条件路由、退回循环、人工审核与发布确认（已完成）；
+- V0.4（2026-11-22）：按「不对外发布」口径重构交付链，新增 `special_check` 与 `prepare_delivery` 节点（当前为确定性占位），`publisher` 退出工作流并保留为交接桩（已完成）。
 
 ### 10.5 第 2 周实现要点（V0.3）
 
@@ -522,13 +591,14 @@ flowchart TD
 5. **失败不抛出**：三个 Agent 均以契约输出返回 `status=FAILED` 与结构化 `error`，由工作流决定重试或转人工。
 6. **Prompt 不硬编码**：Prompt 位于 YAML 文件，模型输出先经 Pydantic 校验，失败自动携带校验错误重试一次。
 
-### 10.6 第 3 周实现要点（V0.4）
+### 10.6 第 3 周实现要点（V0.4 基线）
 
 | 模块 | 位置 | 说明 |
 | --- | --- | --- |
 | 主编 | `backend/app/agents/chief_editor.py` | 规划节点输出采编计划；审核节点输出四类决策与结构化退回要求 |
-| 发布 | `backend/app/agents/publisher.py` | 校验审核与核查前置条件；未确认时只创建待发布记录 |
-| 模拟发布通道 | `backend/app/services/publish_service.py` | 按 `(article_id, version)` 幂等，可注入失败用于重试测试 |
+| 专项检查 | `backend/app/agents/special_check.py` | D 模块接口的确定性占位，校验报告与稿件版本绑定，输出 `PASSED` / `WARNING` / `BLOCKED` |
+| 预发布准备 | `backend/app/agents/delivery.py` | 校验交付前置条件，汇总交付包，不调用发布接口 |
+| 发布交接桩 | `backend/app/agents/publisher.py`、`backend/app/services/publish_service.py` | 不在工作流中，供 B/D 模块对接 |
 | 路由 | `backend/app/graph/routing.py` | 纯函数条件边，测试无需启动图 |
 | 节点 | `backend/app/graph/nodes.py` | 将 `NewsTaskState` 翻译为 Agent 输入，并写回状态与执行日志 |
 | 工作流 | `backend/app/graph/workflow.py` | 编译 LangGraph、内存检查点、`interrupt` 暂停与恢复封装 |
@@ -537,8 +607,9 @@ flowchart TD
 
 1. **批准必须有核查依据**：事实核查不是 `PASSED` 时，模型的 `APPROVE` 会被系统降级为 `HUMAN_REVIEW`。
 2. **退回目标由代码决定**：`REQUEST_EDIT` 固定为 `target=editor`，`REQUEST_RESEARCH` 固定为 `target=reporter`，模型只提供原因与要求。
-3. **循环有上限**：`retry_count` 达到 `max_retry` 后，任何退回决策都会强制转为 `HUMAN_REVIEW`，避免无限循环。
-4. **发布前置条件**：Publisher 只接受 `chief_decision=APPROVE` 且核查不为 `FAILED`；未确认只返回 `PENDING_PUBLISH`。
-5. **人工权限高于模型**：人工审核通过后，编排以 `APPROVE` 调用 Publisher，但状态中保留 `human_decision` 供追溯。
+3. **修改轮次有上限**：`revision_round` 达到 `max_revision_rounds`（默认 2）后，任何退回决策都会强制转为 `HUMAN_REVIEW`，避免无限循环；该计数与接口失败重试计数相互独立。
+4. **交付前置条件**：预发布准备只接受 `APPROVE` 后的稿件，且事实核查不为 `FAILED`、专项检查不为 `BLOCKED`；交付包生成后任务进入 `PENDING_REVIEW`。
+5. **人工权限高于模型，但不能覆盖硬结论**：人工可以批准并进入预发布准备，也可以终止任务或要求退回；`FAILED` / `BLOCKED` 时人工批准无效，任务保持 `HUMAN_REVIEW`。
 6. **执行可追溯**：每个节点写入 `execution_logs`（Agent、状态、起止时间、摘要或错误）；失败即终止图并写 `FAILED` 状态。
-7. **契约补充**：`ChiefReviewInput` 增加 `requirements`，使审核能对照用户风格与篇幅要求。
+7. **契约补充**：`ChiefReviewInput` 增加 `requirements`、`special_check_report`、`revision_round`、`max_revision_rounds`，使审核能对照用户需求、专项检查结论与修改预算。
+8. **不对外发布**：工作流终点是交付包与 `PENDING_REVIEW`，确认交付后为 `DELIVERED`；系统不调用任何新闻发布接口。

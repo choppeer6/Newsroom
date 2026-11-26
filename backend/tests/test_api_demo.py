@@ -5,7 +5,6 @@ import pytest
 from app.graph.nodes import create_default_agents
 from app.graph.workflow import NewsroomWorkflow
 from app.services.demo_service import DemoService
-from app.services.publish_service import MockPublishService
 from tests.fakes import FakeLLM, FakeSearch, make_hit, make_requirements
 
 API = "/api/news/demo"
@@ -46,7 +45,7 @@ VERIFY = {
 }
 APPROVE = {
     "chief_decision": "APPROVE",
-    "review_comments": "事实核查全部通过，稿件符合报道要求，可以进入发布流程。",
+    "review_comments": "事实核查全部通过，稿件符合报道要求，可以准备交付。",
 }
 REQUEST_EDIT = {
     "chief_decision": "REQUEST_EDIT",
@@ -67,10 +66,9 @@ def install_demo(app):
         agents = create_default_agents(
             llm=llm,
             search=FakeSearch(default=[make_hit()]),
-            publish_service=MockPublishService(),
         )
         app.state.demo_service = DemoService(
-            workflow=NewsroomWorkflow(agents=agents, max_retry=2)
+            workflow=NewsroomWorkflow(agents=agents, max_revision_rounds=2)
         )
         return llm
 
@@ -123,33 +121,36 @@ def test_demo_meta_reports_configuration(client):
     assert data["max_revision_rounds"] == 2
 
 
-def test_demo_happy_path_reaches_publish_confirmation(client, install_demo):
+def test_demo_happy_path_reaches_pending_review_then_delivers(client, install_demo):
     install_demo()
     task_id = start(client)
 
-    snapshot = wait_for(client, task_id, "publish_confirmation")
+    snapshot = wait_for(client, task_id, "pending_review")
 
     assert snapshot["task_id"] == task_id
     assert snapshot["article"]["title"] == DRAFT["title"]
     assert snapshot["article"]["version"] == 2
     assert snapshot["fact_check"]["overall_result"] == "PASSED"
+    assert snapshot["special_check"]["result"] == "PASSED"
     assert snapshot["chief"]["decision"] == "APPROVE"
+    assert snapshot["delivery"]["package_id"].startswith("DLV_")
     assert [item["agent"] for item in snapshot["logs"]] == [
         "chief_editor",
         "reporter",
         "editor",
         "fact_checker",
+        "special_checker",
         "chief_editor",
-        "publisher",
+        "delivery_preparer",
     ]
 
     response = client.post(f"{API}/tasks/{task_id}/confirm", json={"confirm": True})
     assert response.status_code == 200, response.text
-    final = wait_for(client, task_id, "finished")
+    final = wait_for(client, task_id, "delivered")
 
-    assert final["task_status"] == "PUBLISHED"
-    assert final["publication"]["status"] == "PUBLISHED"
-    assert final["publication"]["external_url"].startswith("https://newsroom.local/")
+    assert final["task_status"] == "DELIVERED"
+    assert final["current_stage"] == "delivered"
+    assert final["delivery"]["package_id"].startswith("DLV_")
 
 
 def test_demo_human_review_can_request_edit(client, install_demo):
@@ -184,10 +185,11 @@ def test_demo_human_review_can_request_edit(client, install_demo):
     )
     assert response.status_code == 200, response.text
 
-    updated = wait_for(client, task_id, "publish_confirmation")
-    assert updated["retry_count"] == 1
+    updated = wait_for(client, task_id, "pending_review")
+    assert updated["revision_round"] == 1
     assert updated["article"]["version"] == 3
     assert updated["fact_check"]["article_version"] == 3
+    assert updated["special_check"]["article_version"] == 3
 
 
 def test_demo_review_requires_revision_fields(client, install_demo):
@@ -203,10 +205,10 @@ def test_demo_review_requires_revision_fields(client, install_demo):
     assert response.json()["code"] == 1001
 
 
-def test_demo_rejects_review_during_confirmation(client, install_demo):
+def test_demo_rejects_review_after_delivery_preparation(client, install_demo):
     install_demo()
     task_id = start(client)
-    wait_for(client, task_id, "publish_confirmation")
+    wait_for(client, task_id, "pending_review")
 
     response = client.post(
         f"{API}/tasks/{task_id}/review",
@@ -214,10 +216,10 @@ def test_demo_rejects_review_during_confirmation(client, install_demo):
     )
 
     assert response.status_code == 409
-    assert "发布确认" in response.json()["message"]
+    assert "人工输入" in response.json()["message"]
 
 
-def test_demo_confirm_requires_pending_publication(client, install_demo):
+def test_demo_confirm_requires_pending_review(client, install_demo):
     install_demo(
         [PLAN, QUERIES, DRAFT, EDIT, EXTRACT, VERIFY, HUMAN_REVIEW]
     )
@@ -227,7 +229,7 @@ def test_demo_confirm_requires_pending_publication(client, install_demo):
     response = client.post(f"{API}/tasks/{task_id}/confirm", json={"confirm": True})
 
     assert response.status_code == 409
-    assert "发布确认" in response.json()["message"]
+    assert "待复核" in response.json()["message"]
 
 
 def test_demo_task_not_found(client):

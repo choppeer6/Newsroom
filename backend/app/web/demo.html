@@ -236,6 +236,10 @@
         <h3>事实核查</h3>
         <div class="empty">尚未核查</div>
       </article>
+      <article class="card" id="special-card">
+        <h3>专项检查</h3>
+        <div class="empty">尚未检查</div>
+      </article>
       <article class="card" id="sources-card">
         <h3>信息来源<span class="meta"></span></h3>
         <div class="empty">尚未检索</div>
@@ -256,30 +260,35 @@ const STAGES = [
   ["created", "立项"],
   ["chief_planning", "选题规划"],
   ["research", "检索"],
-  ["writing", "写作"],
   ["editing", "编辑"],
   ["fact_check", "核查"],
+  ["special_check", "专项检查"],
   ["chief_review", "主编审核"],
-  ["human_approval", "人工审核"],
-  ["pending_publish", "待发布"],
-  ["published", "已发布"]
+  ["human_review", "人工审核"],
+  ["prepare_delivery", "准备交付"],
+  ["pending_review", "待复核"],
+  ["delivered", "已交付"]
 ];
 const PHASE_TEXT = {
   running: "运行中",
   human_review: "等待人工审核",
-  publish_confirmation: "等待发布确认",
+  pending_review: "待复核与导出",
+  delivered: "已交付",
+  terminated: "已终止",
   finished: "流程结束",
   failed: "执行失败"
 };
 const PHASE_CLASS = {
   running: "running",
   human_review: "review",
-  publish_confirmation: "review",
+  pending_review: "review",
+  delivered: "done",
+  terminated: "fail",
   finished: "done",
   failed: "fail"
 };
 const DECISION_OPTIONS = [
-  ["APPROVE", "通过", "进入发布确认环节"],
+  ["APPROVE", "通过", "准备交付材料，进入待复核"],
   ["REQUEST_EDIT", "退回编辑", "调整结构或表达后重新核查"],
   ["REQUEST_RESEARCH", "退回记者", "补充资料后重写并重新核查"],
   ["TERMINATE", "终止任务", "结束本次采编流程"]
@@ -327,10 +336,11 @@ function renderPipeline(snap) {
   if (stage === "error" && snap.logs && snap.logs.length) {
     const agentMap = {
       chief_editor: "chief_planning",
-      reporter: "writing",
+      reporter: "research",
       editor: "editing",
       fact_checker: "fact_check",
-      publisher: "pending_publish"
+      special_checker: "special_check",
+      delivery_preparer: "prepare_delivery"
     };
     const last = snap.logs[snap.logs.length - 1];
     const mapped = agentMap[last.agent];
@@ -340,7 +350,7 @@ function renderPipeline(snap) {
     let cls = "";
     if (current === index) cls = failed ? "failed" : "active";
     else if (current > index) cls = "done";
-    else if (snap && snap.task_status === "PUBLISHED" && key === "published") cls = "done";
+    else if (snap && snap.task_status === "DELIVERED" && key === "delivered") cls = "done";
     return `<li class="${cls}"><span class="dot"></span>${label}</li>`;
   }).join("");
 }
@@ -348,14 +358,15 @@ function renderPipeline(snap) {
 function renderStatus(snap) {
   const pill = $("phase-pill");
   pill.className = "pill " + (PHASE_CLASS[snap.phase] || "");
-  pill.textContent = PHASE_TEXT[snap.phase] + (snap.phase === "finished" ? ` · ${snap.task_status}` : "");
+  pill.textContent = PHASE_TEXT[snap.phase] || snap.phase;
   $("task-id").textContent = snap.task_id;
-  $("retry-info").textContent = `退回次数 ${snap.retry_count} / ${snap.max_retry}`;
+  $("retry-info").textContent = `修改轮次 ${snap.revision_round} / ${snap.max_revision_rounds}${snap.paused ? " · 已暂停" : ""}`;
 }
 
 function reviewCard(snap) {
   const chief = snap.chief || {};
   const fact = snap.fact_check || {};
+  const special = snap.special_check || {};
   const options = DECISION_OPTIONS.map(([value, label, desc]) => `
     <label class="opt">
       <input type="radio" name="decision" value="${value}" ${value === "APPROVE" ? "" : ""}>
@@ -365,7 +376,8 @@ function reviewCard(snap) {
     <div class="callout">
       <h3>等待人工审核</h3>
       <p class="lead">主编判定 <code>${esc(chief.decision || "—")}</code>，核查结论
-        <code>${esc(fact.overall_result || "—")}</code>。请给出处理意见后继续流程。</p>
+        <code>${esc(fact.overall_result || "—")}</code>，专项检查
+        <code>${esc(special.result || "—")}</code>。请给出处理意见后继续流程。</p>
       <dl class="kv">
         <dt>稿件</dt><dd>${esc(snap.article ? snap.article.title : "—")} · v${esc(snap.article ? snap.article.version : "—")}</dd>
         <dt>主编意见</dt><dd>${esc(chief.comments || "—")}</dd>
@@ -382,21 +394,21 @@ function reviewCard(snap) {
     </div>`;
 }
 
-function confirmCard(snap) {
-  const pub = snap.publication || {};
+function deliveryCard(snap) {
+  const dlv = snap.delivery || {};
   return `
     <div class="callout confirm">
-      <h3>等待发布确认</h3>
-      <p class="lead">${esc(pub.message || "稿件已进入待发布状态")}</p>
+      <h3>待复核与导出</h3>
+      <p class="lead">${esc(dlv.note || "交付材料已准备，请复核后导出。")}</p>
       <dl class="kv">
         <dt>稿件</dt><dd>${esc(snap.article ? snap.article.title : "—")}</dd>
         <dt>编号</dt><dd><code>${esc(snap.article ? snap.article.article_id : "—")}</code></dd>
         <dt>版本</dt><dd>v${esc(snap.article ? snap.article.version : "—")}</dd>
-        <dt>状态</dt><dd>${esc(pub.status || "—")}</dd>
+        <dt>材料包</dt><dd><code>${esc(dlv.package_id || "—")}</code></dd>
       </dl>
       <div class="actions">
-        <button class="btn success" id="confirm-yes" type="button">确认发布</button>
-        <button class="btn ghost" id="confirm-no" type="button">暂不发布</button>
+        <button class="btn success" id="confirm-yes" type="button">确认交付</button>
+        <button class="btn ghost" id="confirm-no" type="button">暂不交付</button>
       </div>
     </div>`;
 }
@@ -410,25 +422,21 @@ function outcomeCard(snap) {
         <p class="lead"><code>${esc(err.code || "UNKNOWN")}</code> · ${esc(err.message || "未知错误")}</p>
       </div>`;
   }
-  if (snap.task_status === "CANCELLED") {
-    return `<div class="callout fail"><h3>任务已终止</h3><p class="lead">本次采编流程已取消。</p></div>`;
+  if (snap.task_status === "TERMINATED") {
+    return `<div class="callout fail"><h3>任务已终止</h3><p class="lead">本次采编流程已终止。</p></div>`;
   }
-  if (snap.task_status === "PUBLISHED") {
-    const url = (snap.publication || {}).external_url;
+  if (snap.task_status === "DELIVERED") {
     return `
       <div class="callout done">
-        <h3>发布完成</h3>
-        <p class="lead">稿件 v${esc(snap.article ? snap.article.version : "—")} 已发布${url ? `：<a href="${esc(url)}" target="_blank" rel="noreferrer">${esc(url)}</a>` : "。"}</p>
+        <h3>交付完成</h3>
+        <p class="lead">稿件 v${esc(snap.article ? snap.article.version : "—")} 已确认交付，用户可自行导出与提交。</p>
       </div>`;
-  }
-  if (snap.task_status === "PENDING_PUBLISH") {
-    return `<div class="callout confirm"><h3>已暂缓发布</h3><p class="lead">稿件保留在待发布状态，本次流程结束。</p></div>`;
   }
   return "";
 }
 
 function renderAttention(snap) {
-  const key = [snap.phase, snap.task_status, snap.retry_count, snap.article && snap.article.version].join(":");
+  const key = [snap.phase, snap.task_status, snap.revision_round, snap.article && snap.article.version].join(":");
   if (key === attentionKey) return;
   attentionKey = key;
   const box = $("attention");
@@ -446,8 +454,8 @@ function renderAttention(snap) {
       fields.style.display = ["REQUEST_EDIT", "REQUEST_RESEARCH"].includes(checked.value) ? "block" : "none";
     }
     form.addEventListener("submit", submitReview);
-  } else if (snap.phase === "publish_confirmation") {
-    box.innerHTML = confirmCard(snap);
+  } else if (snap.phase === "pending_review") {
+    box.innerHTML = deliveryCard(snap);
     $("confirm-yes").addEventListener("click", () => submitConfirm(true));
     $("confirm-no").addEventListener("click", () => submitConfirm(false));
   } else {
@@ -504,6 +512,22 @@ function renderFact(snap) {
     <ul class="claims">${claims}</ul>${issues}`;
 }
 
+function renderSpecial(snap) {
+  const special = snap.special_check;
+  if (!special) {
+    $("special-card").innerHTML = `<h3>专项检查</h3><div class="empty">尚未检查</div>`;
+    return;
+  }
+  const issues = special.issues && special.issues.length
+    ? `<ul class="plain">${special.issues.map((i) => `<li>[${esc(i.severity)}] ${esc(i.description)}${i.suggestion ? `（建议：${esc(i.suggestion)}）` : ""}</li>`).join("")}</ul>`
+    : `<p class="muted">未发现内容规范或敏感信息问题。</p>`;
+  $("special-card").innerHTML = `
+    <h3>专项检查<span class="meta">${esc(special.report_id)} · v${esc(special.article_version)}</span></h3>
+    <p class="lead"><span class="tag ${esc(special.result)}">${esc(special.result)}</span></p>
+    <p class="muted">${esc(special.summary)}</p>
+    ${issues}`;
+}
+
 function renderSources(snap) {
   const sources = snap.sources || [];
   const card = $("sources-card");
@@ -550,6 +574,7 @@ function render(snap) {
   renderArticle(snap);
   renderPlan(snap);
   renderFact(snap);
+  renderSpecial(snap);
   renderSources(snap);
   renderLogs(snap);
 }
@@ -620,6 +645,7 @@ async function submitConfirm(confirm) {
       method: "POST",
       body: JSON.stringify({ confirm })
     });
+    if (!confirm) toast("已保留在待复核状态，材料不会丢失");
     attentionKey = null;
     $("attention").innerHTML = "";
     startPolling();
@@ -686,7 +712,7 @@ $("start-form").addEventListener("submit", async (event) => {
       badge("LLM ", meta.llm_configured),
       badge("搜索 ", meta.search_configured),
       `<span class="badge">${esc(meta.llm_model)}</span>`,
-      `<span class="badge">退回上限 ${esc(meta.max_revision_rounds)}</span>`
+      `<span class="badge">修改轮次上限 ${esc(meta.max_revision_rounds)}</span>`
     ].join("");
     if (!meta.llm_configured || !meta.search_configured) {
       toast("后端尚未配置 LLM 或搜索 Key，发起任务会失败");

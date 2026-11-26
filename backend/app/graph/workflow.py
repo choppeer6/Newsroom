@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from app.core.config import get_settings
+from app.core.retries import InterfaceRetryTracker, reset_tracker, set_tracker
 from app.graph import routing
 from app.graph.nodes import WorkflowAgents, create_default_agents, make_nodes
 from app.graph.state import NewsTaskState
@@ -38,19 +40,52 @@ def default_checkpointer() -> MemorySaver:
     )
 
 
+def _tracked_node(
+    node: Callable[[NewsTaskState], Awaitable[dict[str, Any]]],
+    limit: int,
+) -> Callable[[NewsTaskState], Awaitable[dict[str, Any]]]:
+    """Bind a per-task retry budget to a node and persist consumed retries."""
+
+    async def wrapped(state: NewsTaskState) -> dict[str, Any]:
+        tracker = InterfaceRetryTracker(
+            limit=limit, counts=dict(state.interface_retry_counts)
+        )
+        token = set_tracker(tracker)
+        try:
+            result = await node(state)
+        finally:
+            reset_tracker(token)
+        if tracker.counts != state.interface_retry_counts:
+            return {**result, "interface_retry_counts": tracker.snapshot()}
+        return result
+
+    return wrapped
+
+
 def build_workflow(
     *,
     agents: WorkflowAgents | None = None,
     checkpointer: MemorySaver | None = None,
-    max_retry: int | None = None,
+    max_revision_rounds: int | None = None,
+    max_interface_retries: int | None = None,
 ):
-    retry_cap = get_settings().max_revision_rounds if max_retry is None else max_retry
+    settings = get_settings()
+    revision_cap = (
+        settings.max_revision_rounds
+        if max_revision_rounds is None
+        else max_revision_rounds
+    )
+    retry_cap = (
+        settings.max_interface_retries
+        if max_interface_retries is None
+        else max_interface_retries
+    )
     resolved_agents = agents or create_default_agents()
-    nodes = make_nodes(resolved_agents, max_retry=retry_cap)
+    nodes = make_nodes(resolved_agents, max_revision_rounds=revision_cap)
 
     builder = StateGraph(NewsTaskState)
     for name, node in nodes.items():
-        builder.add_node(name, node)
+        builder.add_node(name, _tracked_node(node, retry_cap))
 
     builder.add_edge(START, "chief_planning")
     builder.add_conditional_edges(
@@ -71,13 +106,18 @@ def build_workflow(
     builder.add_conditional_edges(
         "fact_checker",
         routing.route_after_fact_checker,
+        {"special_check": "special_check", routing.END: END},
+    )
+    builder.add_conditional_edges(
+        "special_check",
+        routing.route_after_special_check,
         {"chief_review": "chief_review", routing.END: END},
     )
     builder.add_conditional_edges(
         "chief_review",
         routing.route_after_review,
         {
-            "publisher": "publisher",
+            "prepare_delivery": "prepare_delivery",
             "editor": "editor",
             "reporter": "reporter",
             "human_approval": "human_approval",
@@ -88,23 +128,13 @@ def build_workflow(
         "human_approval",
         routing.route_after_human_approval,
         {
-            "publisher": "publisher",
+            "prepare_delivery": "prepare_delivery",
             "editor": "editor",
             "reporter": "reporter",
             routing.END: END,
         },
     )
-    builder.add_conditional_edges(
-        "publisher",
-        routing.route_after_publisher,
-        {"user_confirmation": "user_confirmation", routing.END: END},
-    )
-    builder.add_conditional_edges(
-        "user_confirmation",
-        routing.route_after_confirmation,
-        {"publish": "publish", routing.END: END},
-    )
-    builder.add_edge("publish", END)
+    builder.add_edge("prepare_delivery", END)
 
     return builder.compile(checkpointer=checkpointer or default_checkpointer())
 
@@ -120,6 +150,11 @@ def _coerce_state(raw: Any) -> NewsTaskState:
         return raw
     data = {key: value for key, value in raw.items() if key in NewsTaskState.model_fields}
     return NewsTaskState.model_validate(data)
+
+
+state_from_values = _coerce_state
+
+_CONTINUE = object()
 
 
 def _interrupt_value(source: Any) -> dict[str, Any] | None:
@@ -139,15 +174,25 @@ class NewsroomWorkflow:
         *,
         agents: WorkflowAgents | None = None,
         checkpointer: MemorySaver | None = None,
-        max_retry: int | None = None,
+        max_revision_rounds: int | None = None,
+        max_interface_retries: int | None = None,
     ) -> None:
-        self.max_retry = (
-            get_settings().max_revision_rounds if max_retry is None else max_retry
+        settings = get_settings()
+        self.max_revision_rounds = (
+            settings.max_revision_rounds
+            if max_revision_rounds is None
+            else max_revision_rounds
+        )
+        self.max_interface_retries = (
+            settings.max_interface_retries
+            if max_interface_retries is None
+            else max_interface_retries
         )
         self._graph = build_workflow(
             agents=agents,
             checkpointer=checkpointer,
-            max_retry=self.max_retry,
+            max_revision_rounds=self.max_revision_rounds,
+            max_interface_retries=self.max_interface_retries,
         )
 
     @property
@@ -176,3 +221,39 @@ class NewsroomWorkflow:
             state=_coerce_state(snapshot.values),
             interrupt=_interrupt_value(snapshot),
         )
+
+    async def has_pending_interrupt(self, task_id: str) -> bool:
+        snapshot = await self._graph.aget_state(self._config(task_id))
+        if not snapshot or not snapshot.next:
+            return False
+        return bool(getattr(snapshot, "interrupts", None))
+
+    async def has_next_step(self, task_id: str) -> bool:
+        snapshot = await self._graph.aget_state(self._config(task_id))
+        return bool(snapshot and snapshot.next)
+
+    async def stream(self, state: NewsTaskState) -> AsyncIterator[dict[str, Any]]:
+        async for chunk in self._graph.astream(
+            state, self._config(state.task_id), stream_mode="values"
+        ):
+            yield chunk
+
+    async def stream_continue(
+        self, task_id: str, value: Any = _CONTINUE
+    ) -> AsyncIterator[dict[str, Any]]:
+        payload = None if value is _CONTINUE else Command(resume=value)
+        async for chunk in self._graph.astream(
+            payload, self._config(task_id), stream_mode="values"
+        ):
+            yield chunk
+
+    async def stream_recheck(
+        self, task_id: str, values: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Restart at fact_check for a new article version, skipping planning/writing."""
+        config = self._config(task_id)
+        await self._graph.aupdate_state(config, values, as_node="editor")
+        async for chunk in self._graph.astream(
+            None, config, stream_mode="values"
+        ):
+            yield chunk

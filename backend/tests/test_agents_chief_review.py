@@ -5,6 +5,8 @@ from app.agents.contracts import ChiefReviewInput
 from app.schemas.domain import (
     FactCheckReport,
     SourceEvidence,
+    SpecialCheckIssue,
+    SpecialCheckReport,
     VerificationClaim,
 )
 from app.schemas.enums import (
@@ -13,6 +15,8 @@ from app.schemas.enums import (
     ClaimVerificationResult,
     FactCheckOverallResult,
     RevisionTarget,
+    SpecialCheckResult,
+    SpecialCheckSeverity,
 )
 from tests.fakes import FakeLLM, make_article, make_plan, make_requirements, make_source
 
@@ -70,11 +74,43 @@ def make_report(overall: FactCheckOverallResult) -> FactCheckReport:
     )
 
 
+def make_special(
+    result: SpecialCheckResult = SpecialCheckResult.PASSED,
+) -> SpecialCheckReport:
+    issues = []
+    if result == SpecialCheckResult.BLOCKED:
+        issues = [
+            SpecialCheckIssue(
+                category="敏感信息",
+                severity=SpecialCheckSeverity.BLOCKING,
+                description="包含未经核实的个人隐私信息。",
+            )
+        ]
+    elif result == SpecialCheckResult.WARNING:
+        issues = [
+            SpecialCheckIssue(
+                category="表述规范",
+                severity=SpecialCheckSeverity.WARNING,
+                description="标题措辞可能需要斟酌。",
+            )
+        ]
+    return SpecialCheckReport(
+        report_id="SC_0001",
+        task_id="TASK_001",
+        article_id="ART_0001",
+        article_version=2,
+        result=result,
+        summary="专项检查结论",
+        issues=issues,
+    )
+
+
 def make_input(
     overall: FactCheckOverallResult = FactCheckOverallResult.PASSED,
     *,
-    retry_count: int = 0,
-    max_retry: int = 2,
+    special: SpecialCheckResult = SpecialCheckResult.PASSED,
+    revision_round: int = 0,
+    max_revision_rounds: int = 2,
 ) -> ChiefReviewInput:
     return ChiefReviewInput(
         task_id="TASK_001",
@@ -87,8 +123,9 @@ def make_input(
         article_id="ART_0001",
         article_version=2,
         fact_check_report=make_report(overall),
-        retry_count=retry_count,
-        max_retry=max_retry,
+        special_check_report=make_special(special),
+        revision_round=revision_round,
+        max_revision_rounds=max_revision_rounds,
     )
 
 
@@ -151,6 +188,26 @@ def test_review_downgrades_approve_when_fact_check_failed():
     assert "系统已转为人工审核" in output.review_comments
 
 
+def test_review_downgrades_approve_when_special_check_blocked():
+    output = run_agent(
+        ChiefReviewAgent(llm=FakeLLM([APPROVE])),
+        make_input(special=SpecialCheckResult.BLOCKED),
+    )
+
+    assert output.chief_decision == ChiefDecision.HUMAN_REVIEW
+    assert "专项检查存在阻断项" in output.review_comments
+
+
+def test_review_keeps_approve_but_notes_special_check_warning():
+    output = run_agent(
+        ChiefReviewAgent(llm=FakeLLM([APPROVE])),
+        make_input(special=SpecialCheckResult.WARNING),
+    )
+
+    assert output.chief_decision == ChiefDecision.APPROVE
+    assert "专项检查存在提示项" in output.review_comments
+
+
 def test_review_builds_editor_revision_request():
     output = run_agent(ChiefReviewAgent(llm=FakeLLM([REQUEST_EDIT])), make_input())
 
@@ -185,16 +242,16 @@ def test_review_rejects_revision_without_requirements():
     assert len(llm.calls) == 2
 
 
-def test_review_forces_human_review_when_retry_budget_exhausted():
+def test_review_forces_human_review_when_revision_budget_exhausted():
     output = run_agent(
         ChiefReviewAgent(llm=FakeLLM([REQUEST_RESEARCH])),
-        make_input(retry_count=2, max_retry=2),
+        make_input(revision_round=2, max_revision_rounds=2),
     )
 
     assert output.status == AgentStatus.COMPLETED
     assert output.chief_decision == ChiefDecision.HUMAN_REVIEW
     assert output.revision_request is None
-    assert "退回次数已达上限" in output.review_comments
+    assert "修改轮次已达上限" in output.review_comments
 
 
 def test_review_human_review_ignores_revision_fields():

@@ -5,11 +5,13 @@ from app.agents.contracts import (
     AGENT_CONTRACTS,
     ChiefPlanningOutput,
     ChiefReviewOutput,
+    DeliveryPreparationInput,
     EditorOutput,
     FactCheckerOutput,
     PublisherInput,
     PublisherOutput,
     ReporterOutput,
+    SpecialCheckOutput,
 )
 from app.schemas.domain import (
     ArticleContent,
@@ -17,10 +19,14 @@ from app.schemas.domain import (
     EditorialPlan,
     ErrorInfo,
     FactCheckFinding,
+    FactCheckReport,
     Publication,
     ResearchSource,
     RevisionRequest,
     SourceEvidence,
+    SpecialCheckFinding,
+    SpecialCheckIssue,
+    SpecialCheckReport,
     VerificationClaim,
 )
 from app.schemas.enums import (
@@ -29,6 +35,8 @@ from app.schemas.enums import (
     ClaimVerificationResult,
     FactCheckOverallResult,
     RevisionTarget,
+    SpecialCheckResult,
+    SpecialCheckSeverity,
 )
 
 
@@ -238,12 +246,91 @@ def test_publisher_output_defaults_to_pending_publish():
     assert output.publication.status == "PENDING_PUBLISH"
 
 
+def make_special(
+    result: SpecialCheckResult = SpecialCheckResult.PASSED,
+) -> SpecialCheckReport:
+    issues = (
+        [
+            SpecialCheckIssue(
+                category="敏感信息",
+                severity=SpecialCheckSeverity.BLOCKING,
+                description="包含敏感信息。",
+            )
+        ]
+        if result == SpecialCheckResult.BLOCKED
+        else []
+    )
+    return SpecialCheckReport(
+        report_id="SC_001",
+        task_id="TASK_001",
+        article_id="ARTICLE_001",
+        article_version=1,
+        result=result,
+        summary="专项检查结论",
+        issues=issues,
+    )
+
+
+def test_blocked_special_finding_requires_blocking_issue():
+    with pytest.raises(ValidationError, match="BLOCKING"):
+        SpecialCheckFinding(
+            result=SpecialCheckResult.BLOCKED,
+            summary="结论为阻断但缺少阻断项",
+        )
+
+
+def test_special_check_output_completed_requires_binding():
+    with pytest.raises(ValidationError, match="article_id"):
+        SpecialCheckOutput(
+            finding=SpecialCheckFinding(
+                result=SpecialCheckResult.PASSED, summary="通过"
+            )
+        )
+
+
+def test_delivery_rejects_failed_fact_check():
+    with pytest.raises(ValidationError, match="FAILED fact check"):
+        DeliveryPreparationInput(
+            task_id="TASK_001",
+            article_id="ARTICLE_001",
+            article=article(),
+            article_version=1,
+            fact_check_report=FactCheckReport(
+                report_id="FC_001",
+                article_id="ARTICLE_001",
+                article_version=1,
+                overall_result=FactCheckOverallResult.FAILED,
+                claims=[unverified_claim()],
+            ),
+            special_check_report=make_special(),
+        )
+
+
+def test_delivery_rejects_blocked_special_check():
+    with pytest.raises(ValidationError, match="BLOCKED special check"):
+        DeliveryPreparationInput(
+            task_id="TASK_001",
+            article_id="ARTICLE_001",
+            article=article(),
+            article_version=1,
+            fact_check_report=FactCheckReport(
+                report_id="FC_001",
+                article_id="ARTICLE_001",
+                article_version=1,
+                overall_result=FactCheckOverallResult.PASSED,
+                claims=[verified_claim()],
+            ),
+            special_check_report=make_special(SpecialCheckResult.BLOCKED),
+        )
+
+
 def test_agent_contract_registry_covers_workflow_nodes():
     assert set(AGENT_CONTRACTS) == {
         "chief_planning",
         "reporter",
         "editor",
         "fact_checker",
+        "special_check",
         "chief_review",
-        "publisher",
+        "prepare_delivery",
     }

@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,11 +11,15 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.response import get_request_id
 from app.api.router import api_router
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.errors import AppError
+from app.db.session import dispose_db, init_db
+from app.db.task_store import SqlTaskStore
+from app.graph.workflow import NewsroomWorkflow
 from app.services.demo_service import DemoService
+from app.services.execution_service import ExecutionService
 from app.services.task_service import TaskService
-from app.services.task_store import InMemoryTaskStore
+from app.services.task_store import TaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +54,46 @@ def _error_response(
     )
 
 
-def create_app() -> FastAPI:
-    settings = get_settings()
-    app = FastAPI(title=settings.app_name, version=settings.app_version)
+def create_app(
+    *,
+    settings: Settings | None = None,
+    task_store: TaskStore | None = None,
+    workflow: NewsroomWorkflow | None = None,
+) -> FastAPI:
+    resolved_settings = settings or get_settings()
 
-    app.state.settings = settings
-    app.state.task_service = TaskService(InMemoryTaskStore())
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        if task_store is not None:
+            application.state.task_service = TaskService(task_store)
+        else:
+            session_factory = await init_db(
+                resolved_settings.database_url,
+                echo=resolved_settings.database_echo,
+            )
+            application.state.task_service = TaskService(
+                SqlTaskStore(session_factory)
+            )
+        application.state.execution_service = ExecutionService(
+            application.state.task_service,
+            workflow=workflow,
+        )
+        recovered = await application.state.execution_service.recover_stale_tasks()
+        if recovered:
+            logger.warning("marked %d orphaned RUNNING tasks as FAILED", recovered)
+        try:
+            yield
+        finally:
+            if task_store is None:
+                await dispose_db()
+
+    app = FastAPI(
+        title=resolved_settings.app_name,
+        version=resolved_settings.app_version,
+        lifespan=lifespan,
+    )
+
+    app.state.settings = resolved_settings
     app.state.demo_service = DemoService()
 
     @app.middleware("http")
@@ -67,7 +106,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
+        allow_origins=resolved_settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -127,7 +166,7 @@ def create_app() -> FastAPI:
             http_status=500,
         )
 
-    app.include_router(api_router, prefix=settings.api_prefix)
+    app.include_router(api_router, prefix=resolved_settings.api_prefix)
 
     @app.get("/demo", include_in_schema=False)
     async def demo_console() -> FileResponse:

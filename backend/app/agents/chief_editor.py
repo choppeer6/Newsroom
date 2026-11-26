@@ -22,6 +22,7 @@ from app.schemas.enums import (
     ChiefDecision,
     FactCheckOverallResult,
     RevisionTarget,
+    SpecialCheckResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,11 +132,25 @@ def apply_review_constraints(
         decision = ChiefDecision.HUMAN_REVIEW
 
     if (
+        decision == ChiefDecision.APPROVE
+        and payload_input.special_check_report.result == SpecialCheckResult.BLOCKED
+    ):
+        notes.append("专项检查存在阻断项，系统已转为人工审核")
+        decision = ChiefDecision.HUMAN_REVIEW
+
+    if (
+        decision == ChiefDecision.APPROVE
+        and payload_input.special_check_report.result == SpecialCheckResult.WARNING
+    ):
+        notes.append("专项检查存在提示项，请人工复核")
+
+    if (
         decision in _REVISION_DECISIONS
-        and payload_input.retry_count >= payload_input.max_retry
+        and payload_input.revision_round >= payload_input.max_revision_rounds
     ):
         notes.append(
-            f"退回次数已达上限（{payload_input.max_retry}），系统已转为人工审核"
+            "修改轮次已达上限"
+            f"（{payload_input.max_revision_rounds}），系统已转为人工审核"
         )
         decision = ChiefDecision.HUMAN_REVIEW
 
@@ -212,12 +227,12 @@ class ChiefReviewAgent(BaseAgent[ChiefReviewInput, ChiefReviewOutput]):
 
     async def run(self, payload: ChiefReviewInput) -> ChiefReviewOutput:
         logger.info(
-            "chief_review start task_id=%s article_id=%s version=%d retry=%d/%d",
+            "chief_review start task_id=%s article_id=%s version=%d revision=%d/%d",
             payload.task_id,
             payload.article_id,
             payload.article_version,
-            payload.retry_count,
-            payload.max_retry,
+            payload.revision_round,
+            payload.max_revision_rounds,
         )
         try:
             spec = load_prompt("chief_editor", "review")
@@ -242,8 +257,9 @@ class ChiefReviewAgent(BaseAgent[ChiefReviewInput, ChiefReviewOutput]):
                         ]
                     ),
                     "fact_check_json": dump_json(payload.fact_check_report),
-                    "retry_count": payload.retry_count,
-                    "max_retry": payload.max_retry,
+                    "special_check_json": dump_json(payload.special_check_report),
+                    "revision_round": payload.revision_round,
+                    "max_revision_rounds": payload.max_revision_rounds,
                 },
                 validate=lambda data: ReviewPayload.model_validate(data),
             )

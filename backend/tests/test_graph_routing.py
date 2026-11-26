@@ -18,13 +18,14 @@ def test_planning_routes_to_reporter_or_ends_on_failure():
 def test_linear_routes_follow_pipeline():
     assert routing.route_after_reporter(make_state()) == "editor"
     assert routing.route_after_editor(make_state()) == "fact_checker"
-    assert routing.route_after_fact_checker(make_state()) == "chief_review"
+    assert routing.route_after_fact_checker(make_state()) == "special_check"
+    assert routing.route_after_special_check(make_state()) == "chief_review"
 
 
 def test_review_routes_by_decision():
     assert (
         routing.route_after_review(make_state(chief_decision=ChiefDecision.APPROVE))
-        == "publisher"
+        == "prepare_delivery"
     )
     assert (
         routing.route_after_review(
@@ -55,7 +56,7 @@ def test_failed_task_ends_from_any_agent():
     assert routing.route_after_reporter(failed) == routing.END
     assert routing.route_after_editor(failed) == routing.END
     assert routing.route_after_fact_checker(failed) == routing.END
-    assert routing.route_after_publisher(failed) == routing.END
+    assert routing.route_after_special_check(failed) == routing.END
     assert (
         routing.route_after_review(
             make_state(
@@ -70,9 +71,21 @@ def test_failed_task_ends_from_any_agent():
 def test_human_routes_by_decision():
     assert (
         routing.route_after_human_approval(
-            make_state(human_decision=HumanDecision.APPROVE)
+            make_state(
+                human_decision=HumanDecision.APPROVE,
+                task_status=TaskStatus.RUNNING,
+            )
         )
-        == "publisher"
+        == "prepare_delivery"
+    )
+    assert (
+        routing.route_after_human_approval(
+            make_state(
+                human_decision=HumanDecision.APPROVE,
+                task_status=TaskStatus.HUMAN_REVIEW,
+            )
+        )
+        == routing.END
     )
     assert (
         routing.route_after_human_approval(
@@ -93,15 +106,3 @@ def test_human_routes_by_decision():
         == routing.END
     )
     assert routing.route_after_human_approval(make_state()) == routing.END
-
-
-def test_publisher_and_confirmation_routes():
-    assert routing.route_after_publisher(make_state()) == "user_confirmation"
-    assert (
-        routing.route_after_confirmation(make_state(user_confirmation=True))
-        == "publish"
-    )
-    assert (
-        routing.route_after_confirmation(make_state(user_confirmation=False))
-        == routing.END
-    )

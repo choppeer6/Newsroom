@@ -370,3 +370,160 @@ flowchart TD
 - MySQL 持久化、持久化 Checkpointer 与进程重启恢复（第 4 周）；
 - 工作流执行 API（创建任务后触发、人工审核恢复、发布确认恢复）与并发控制（第 4 ~ 5 周）；
 - 前端页面与真实发布通道（第 5 周）。
+
+---
+
+## 13. C-01 数据库基础落地（2026-11-22）
+
+**已完成**
+
+- 新增 SQLAlchemy 异步数据库层：`app/db/base.py`、`app/db/session.py`、`app/db/task_store.py`；
+- 新增任务表与执行事件表模型：`tasks`、`execution_events`；任务状态与当前阶段分别存列，完整状态快照存 `state_json`；
+- 任务存储支持内存与数据库两种实现，API 默认走数据库；测试默认使用内存存储，另加临时 SQLite 数据库测试；
+- 执行事件按 `task_id + seq` 顺序落库，任务更新时从 `execution_logs` 增量同步；
+- 增加任务级执行锁 `try_acquire_lock / release_lock`，为 C-06 防重复启动预留；
+- 配置增加 `database_echo`、`max_interface_retries`；本地默认数据库改为 `sqlite+aiosqlite:///./newsroom.db`，MySQL 仍可通过 `DATABASE_URL` 切换；
+- `requirements.txt` 增加 `sqlalchemy[asyncio]` 与 `aiosqlite`；
+- 新增 `tests/test_db_store.py`，覆盖任务持久化、事件顺序、执行锁、API 落库与重启后查询。
+
+**验证结果**
+
+- 全量测试 `134 passed`；
+- 同一 SQLite 文件关闭应用后重新启动，任务仍可查询；
+- 同一任务第二次获取执行锁失败，释放后可再次获取。
+
+**当前边界**
+
+- 本轮只落 C 的任务与执行事件，没有改任务状态枚举和工作流末段；
+- 稿件版本、来源/核查/专项检查报告仍由 B、D 各自建表；
+- 下一阶段：按分工文档将任务状态改为“运行、待人工处理、待复核、已交付、失败、终止”，并把发布链换成专项检查、主编决策与预发布准备链。
+
+## 14. C 状态机与交付链改造（2026-11-22）
+
+**背景**
+
+按分工文档与课程业务口径，系统不对外发布新闻：主编审核通过后只需准备交付材料，由用户复核、导出并自行投稿。第 3 周的发布链（Publisher → 发布确认）与此不符，需要改为「专项检查 → 主编决策 → 预发布准备 → 待复核 → 已交付」。
+
+**已完成**
+
+- 任务状态改为六个业务状态：`RUNNING`（运行）、`HUMAN_REVIEW`（待人工处理）、`PENDING_REVIEW`（待复核）、`DELIVERED`（已交付）、`FAILED`（失败）、`TERMINATED`（终止）；执行阶段由 `WorkflowStage` 单独记录，不再混入业务状态；
+- 工作流新增两个节点（当前为确定性占位，D 模块后续替换）：
+  - `special_check`：事实核查之后执行，报告绑定 `task_id + article_id + article_version`，结论 `PASSED / WARNING / BLOCKED`；
+  - `prepare_delivery`：主编 `APPROVE` 后执行，校验前置条件并生成 `DeliveryPackage`，任务进入 `PENDING_REVIEW`；
+- 主编审核新增硬约束：事实核查非 `PASSED` 或专项检查 `BLOCKED` 时 `APPROVE` 降级为 `HUMAN_REVIEW`；`WARNING` 保留 `APPROVE` 但注明提示项；`revision_round` 达到 `max_revision_rounds` 强制转人工；
+- 人工审核不能覆盖 `FAILED` / `BLOCKED` 结论：此时批准无效，任务保持 `HUMAN_REVIEW`；人工仍可终止任务或退回修改；
+- 修改轮次 `revision_round` 与接口失败重试 `interface_retry_counts` 分离，前者只统计稿件退回次数；
+- 取消任务与人工终止统一落到 `TERMINATED`；已交付或已终止任务不可再取消（409）；
+- 交付确认：`PENDING_REVIEW` 下确认交付置为 `DELIVERED`，暂不交付保持 `PENDING_REVIEW`；非待复核状态调用交付接口返回 409；
+- 演示控制台同步新阶段（专项检查、主编审核、待复核、已交付）、修改轮次与交付卡片；
+- `publisher` / `publish_service` 退出工作流，代码与契约保留为 B/D 交接桩。
+
+**文档同步**
+
+- `docs/04-workflow/workflow-design.md`：节点、路由、状态迁移与当前图代码（V0.3）；
+- `docs/05-data-design/state-schema.md`：字段、领域模型与不变式（V0.3）；
+- `docs/06-api/api-specification.md`：状态口径、交付接口、演示接口与实现状态；
+- `docs/03-agent-design/agent-specification.md`：Agent 关系、审核决策与节点契约（V0.4）；
+- `docs/07-prompts/prompt-design.md`：主编审核 Prompt 新增专项检查与修改轮次变量，交付链无 Prompt。
+
+**验证结果**
+
+- 后端全量测试 `140 passed`；
+- 覆盖：状态不变式、路由、正常工作流（到 `PENDING_REVIEW` 并生成交付包）、专项检查阻断、人工批准/阻断覆盖/终止、修改轮次上限、演示接口交付确认与幂等冲突。
+
+**当前边界与后续**
+
+- C-05 执行服务与接口（execute / pause / resume / decision / events）尚未开始，演示接口暂作为联调入口；
+- C-04 接口失败重试计数与展示待接入执行服务；
+- C-06 重启恢复、重复启动防护（执行锁已就绪）与手工编辑后的版本失效待实现；
+- 专项检查与预发布准备当前为占位实现，待 D 模块交付真实逻辑后替换，契约保持不变。
+
+## 15. C-05 执行服务与接口（2026-11-22）
+
+**已完成**
+
+- 新增 `ExecutionService`（`backend/app/services/execution_service.py`），负责正式任务的执行编排：
+  - `execute`：仅 `CREATED` 且未暂停的任务，校验通过后返回 `202` 并启动后台 `asyncio.Task`，把图运行到下一个暂停点（人工审核 / 待复核 / 失败 / 终止）；
+  - 后台作业每个状态分块落库（指纹变化才写），运行异常统一落 `FAILED` + `RUNTIME_ERROR`，并释放执行锁；
+  - `pause` / `resume`：暂停标记在节点边界生效，任务停止时保存为 `RUNNING + paused`；`resume` 从检查点续跑（`payload=None`），暂停尚未生效时返回 `2003`；
+  - `submit_human_review`：校验任务状态与待处理中断后，以 `Command(resume=payload)` 启动后台续跑，支持批准、退回修改、终止；
+  - `confirm_delivery`：`PENDING_REVIEW` 下确认交付置为 `DELIVERED`，拒绝时保持待复核；
+  - `list_events`：按序返回 Agent 执行事件。
+- 正式接口接入 `/api/news/tasks`：
+  - `POST /{task_id}/execute`、`/pause`、`/resume`（execute / resume 返回 `202`）；
+  - `POST /{task_id}/human-review`（批准 / 退回 / 终止，返回 `202` 与最新 `TaskDetail`）；
+  - `GET /{task_id}/delivery`、`POST /{task_id}/delivery/confirm`；
+  - `GET /{task_id}/events`。
+- 写接口返回最新 `TaskDetail`，前端通过轮询 `GET /tasks/{id}` 获取后台推进结果。
+- 执行期间使用任务级执行锁（`execution_lock_ttl_seconds`，默认 900 秒）；并发启动返回业务码 `2003`；人工决策 / 恢复先等待收尾中的作业退出（最多 5 秒）。
+- 工作流新增 `stream` / `stream_continue` / `has_next_step`，支持按分块消费并在检查点续跑。
+- 执行期间使用任务级执行锁（`execution_lock_ttl_seconds`，默认 900 秒）；并发执行返回业务码 `2003`。
+- 运行时异常会落库为 `FAILED` + `RUNTIME_ERROR`，不会让任务停留在不可解释状态。
+- `create_app` 支持注入自定义工作流，便于测试与后续替换 Agent。
+- 恢复人工审核前通过 `NewsroomWorkflow.has_pending_interrupt` 校验待处理中断，避免对已结束的图重复恢复。
+
+**验证结果**
+
+- 全量测试 `165 passed`；
+- 新增 `tests/test_execution_service.py`、`tests/test_api_execution.py`，覆盖后台执行完成、重复启动、并发 `2003`、暂停 / 恢复（含暂停未生效重试）、执行锁冲突、人工批准 / 退回 / 终止、交付确认（确认与拒绝）、事件查询、参数校验、404 与运行时异常落库。
+
+**当前边界**
+
+- 后台作业为单进程内 `asyncio.Task`，多副本部署需要改为外部任务队列（课程范围不涉及）；
+- 进程崩溃后的锁残留依赖 TTL 到期释放；重启后遗留的 `RUNNING` 任务在启动时标记失败（见 §17）；
+- 进行中的任务依赖进程内 `MemorySaver` 检查点，服务重启后无法续跑（人工编辑可重建检查点）；
+- 演示控制台仍使用 `/api/news/demo` 接口，后续切换到 `/tasks`；
+- SSE 实时进度未实现。
+
+## 16. C-04 条件分支与接口失败重试（2026-11-22）
+
+**已完成**
+
+- 条件分支已由 `backend/app/graph/routing.py` 覆盖：
+  - 主编 / 人工要求补充资料 → 回 `reporter`，要求修改表述 → 回 `editor`，重大争议 → `human_approval`；
+  - 稿件修改轮次 `revision_round` 达到 `max_revision_rounds` 后强制转人工，与接口重试互不影响。
+- 新增 `backend/app/core/retries.py`，按任务、按接口（`llm` / `search`）累计失败重试：
+  - 节点执行期间通过 `ContextVar` 绑定 `InterfaceRetryTracker`，预算为 `Settings.max_interface_retries`（默认 2）；
+  - 节点包装器 `_tracked_node` 在每个节点执行后将新增计数合并进 `interface_retry_counts`，随检查点持久化。
+- LLM 客户端与搜索工具接入重试预算：
+  - 单次调用对可重试错误最多尝试 2 次；
+  - 预算耗尽且仍失败时不重试，LLM 返回 `INTERFACE_RETRY_EXCEEDED`，搜索返回不可重试的 `SEARCH_FAILED`；
+  - 重试计数与修改轮次分开记录，任务详情通过 `TaskDetail.interface_retry_counts` 返回给前端。
+
+**验证结果**
+
+- 全量测试 `172 passed`；
+- 新增 `tests/test_interface_retries.py`，并在 `test_llm_client.py`、`test_search_tool.py` 中补充重试计数、预算耗尽与计数持久化用例。
+
+**当前边界**
+
+- 预算为任务级静态上限，暂不支持按接口配置不同预算；
+- 重试预算耗尽后任务直接 `FAILED`，不支持从失败节点原地续跑（依赖 C-06 的恢复能力）；
+- `interface_retry_counts` 仅统计客户端自动重试，业务层的检索关键词更换不计入该字段。
+
+## 17. C-06 版本与恢复（2026-11-22）
+
+**已完成**
+
+- 新增 `ExecutionService.submit_manual_edit(task_id, article=..., version=...)`：
+  - 仅 `HUMAN_REVIEW` / `PENDING_REVIEW` 且无运行中作业时可调用；新版本号必须大于当前版本；
+  - 清空旧事实核查、专项检查、主编结论、人工决定、修改要求与交付材料，状态置 `RUNNING / fact_check`；
+  - 以完整任务状态写入检查点并从 `fact_checker` 重跑，新报告、审核结论与交付材料全部绑定新版本。
+- 新增 `NewsroomWorkflow.stream_recheck`：`aupdate_state(as_node="editor")` 把下一节点设为 `fact_checker`，跳过计划、采写与编辑；
+  - 检查点丢失时（进程重启）也能用数据库状态重建，验证覆盖该场景。
+- 新版本失效保证由三层共同完成：节点清空旧报告、`NewsTaskState` 校验报告版本与任务版本一致、交付材料校验两个报告 ID 与当前报告一致。
+- 防重复启动：执行锁 + 进程内作业表；已有作业时返回 `2003`，非 `CREATED` 状态拒绝执行，人工决策 / 恢复前等待收尾作业退出。
+- 新增 `ExecutionService.recover_stale_tasks`，并在应用启动时调用：没有活动作业的 `RUNNING` 任务置 `FAILED` + `WORKER_RESTARTED`，清除暂停标记。
+- 人工处理后的续跑路径保持：批准 → 预发布准备，退回编辑 → `editor`，退回补充资料 → `reporter`。
+
+**验证结果**
+
+- 全量测试 `177 passed`；
+- 新增用例覆盖：人工编辑后重跑核查并重新绑定报告、从人工审核中断直接编辑、旧版本号被拒绝、非复核状态被拒绝、重启后重建检查点、启动时清理遗留 `RUNNING` 任务且不影响正在运行的作业。
+
+**当前边界**
+
+- `MemorySaver` 不跨进程保留，重启后进行中的任务无法续跑，只能标记失败或通过人工编辑重建；
+- 崩溃遗留的执行锁依赖 TTL 到期释放，未做启动时强制清理（多副本部署下不安全）；
+- 手动编辑的 HTTP 接口与版本历史存储由 B 负责，C 提供 `submit_manual_edit` 作为通知入口；
+- 尚无持久化 Checkpointer。

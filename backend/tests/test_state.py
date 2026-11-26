@@ -1,18 +1,18 @@
 import pytest
 from pydantic import ValidationError
 
-from app.core.utils import utc_now
 from app.graph.state import NewsTaskState
 from app.schemas.domain import (
+    DeliveryPackage,
     FactCheckReport,
-    Publication,
     SourceEvidence,
+    SpecialCheckReport,
     VerificationClaim,
 )
 from app.schemas.enums import (
     ClaimVerificationResult,
     FactCheckOverallResult,
-    PublicationStatus,
+    SpecialCheckResult,
     TaskStatus,
     WorkflowStage,
 )
@@ -51,15 +51,47 @@ def passed_report(
     )
 
 
+def special_report(
+    *, article_id: str = "ARTICLE_001", article_version: int = 1
+) -> SpecialCheckReport:
+    return SpecialCheckReport(
+        report_id="SC_001",
+        task_id="TASK_TEST",
+        article_id=article_id,
+        article_version=article_version,
+        result=SpecialCheckResult.PASSED,
+        summary="未发现内容规范或敏感信息问题。",
+    )
+
+
+def delivery_package(
+    *,
+    article_id: str = "ARTICLE_001",
+    article_version: int = 1,
+    special_check_report_id: str = "SC_001",
+) -> DeliveryPackage:
+    return DeliveryPackage(
+        package_id="DLV_001",
+        task_id="TASK_TEST",
+        article_id=article_id,
+        article_version=article_version,
+        fact_check_report_id="RPT_001",
+        special_check_report_id=special_check_report_id,
+        source_ids=["SRC_001"],
+    )
+
+
 def test_state_defaults():
     state = make_state()
 
     assert state.task_status == TaskStatus.CREATED
     assert state.current_stage == WorkflowStage.CREATED
-    assert state.retry_count == 0
+    assert state.paused is False
+    assert state.revision_round == 0
+    assert state.interface_retry_counts == {}
     assert state.research_sources == []
     assert state.execution_logs == []
-    assert state.user_confirmation is False
+    assert state.delivery_package is None
     assert state.created_at.tzinfo is not None
 
 
@@ -99,35 +131,49 @@ def test_fact_check_report_article_must_match():
         )
 
 
-def test_published_task_requires_user_confirmation():
-    publication = Publication(
-        article_id="ARTICLE_001",
-        article_version=1,
-        status=PublicationStatus.PUBLISHED,
-        published_at=utc_now(),
-    )
-
-    with pytest.raises(ValidationError, match="user_confirmation"):
+def test_special_check_report_requires_task_binding():
+    with pytest.raises(ValidationError, match="task_id"):
         make_state(
-            task_status=TaskStatus.PUBLISHED,
-            publication=publication,
-            user_confirmation=False,
+            task_id="TASK_OTHER",
+            article_id="ARTICLE_001",
+            article_version=1,
+            special_check_report=special_report(),
         )
 
 
-def test_published_task_accepts_confirmed_publication():
-    publication = Publication(
+def test_pending_review_requires_delivery_package():
+    with pytest.raises(ValidationError, match="delivery_package"):
+        make_state(
+            task_status=TaskStatus.PENDING_REVIEW,
+            article_id="ARTICLE_001",
+            article_version=1,
+            fact_check_report=passed_report(),
+            special_check_report=special_report(),
+        )
+
+
+def test_delivered_accepts_bound_delivery_package():
+    state = make_state(
+        task_status=TaskStatus.DELIVERED,
+        current_stage=WorkflowStage.DELIVERED,
         article_id="ARTICLE_001",
         article_version=1,
-        status=PublicationStatus.PUBLISHED,
-        published_at=utc_now(),
+        fact_check_report=passed_report(),
+        special_check_report=special_report(),
+        delivery_package=delivery_package(),
     )
 
-    state = make_state(
-        task_status=TaskStatus.PUBLISHED,
-        publication=publication,
-        user_confirmation=True,
-    )
+    assert state.task_status == TaskStatus.DELIVERED
+    assert state.delivery_package.package_id == "DLV_001"
 
-    assert state.task_status == TaskStatus.PUBLISHED
-    assert state.publication.status == PublicationStatus.PUBLISHED
+
+def test_delivery_package_report_ids_must_match_current_reports():
+    with pytest.raises(ValidationError, match="special_check_report_id"):
+        make_state(
+            task_status=TaskStatus.PENDING_REVIEW,
+            article_id="ARTICLE_001",
+            article_version=1,
+            fact_check_report=passed_report(),
+            special_check_report=special_report(),
+            delivery_package=delivery_package(special_check_report_id="SC_OTHER"),
+        )

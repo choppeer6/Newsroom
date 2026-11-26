@@ -1,13 +1,13 @@
 from app.core.errors import ConflictError, NotFoundError
 from app.core.utils import generate_id
 from app.graph.state import NewsTaskState
-from app.schemas.domain import TaskRequirements
+from app.schemas.domain import ExecutionLogEntry, TaskRequirements
 from app.schemas.enums import TaskStatus, WorkflowStage
-from app.services.task_store import InMemoryTaskStore
+from app.services.task_store import TaskStore
 
 
 class TaskService:
-    def __init__(self, store: InMemoryTaskStore) -> None:
+    def __init__(self, store: TaskStore) -> None:
         self._store = store
 
     async def create_task(
@@ -57,10 +57,30 @@ class TaskService:
 
     async def cancel_task(self, task_id: str) -> NewsTaskState:
         state = await self.get_task(task_id)
-        if state.task_status in {TaskStatus.PUBLISHED, TaskStatus.CANCELLED}:
-            raise ConflictError(f"任务状态 {state.task_status} 不允许取消")
-        state.task_status = TaskStatus.CANCELLED
-        state.current_stage = WorkflowStage.CANCELLED
+        if state.task_status in {TaskStatus.DELIVERED, TaskStatus.TERMINATED}:
+            raise ConflictError(f"任务状态 {state.task_status} 不允许终止")
+        state.task_status = TaskStatus.TERMINATED
+        state.current_stage = WorkflowStage.TERMINATED
         state.touch()
         await self._store.update(state)
         return state
+
+    async def list_events(self, task_id: str) -> list[ExecutionLogEntry]:
+        await self.get_task(task_id)
+        return await self._store.list_events(task_id)
+
+    async def list_all(self) -> list[NewsTaskState]:
+        return await self._store.list_all()
+
+    async def save_state(self, state: NewsTaskState) -> None:
+        await self._store.update(state)
+
+    async def try_acquire_lock(
+        self, task_id: str, token: str, *, ttl_seconds: int = 60
+    ) -> bool:
+        return await self._store.try_acquire_lock(
+            task_id, token, ttl_seconds=ttl_seconds
+        )
+
+    async def release_lock(self, task_id: str, token: str) -> None:
+        await self._store.release_lock(task_id, token)

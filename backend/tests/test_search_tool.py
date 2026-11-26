@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from app.core.config import Settings
+from app.core.retries import InterfaceRetryTracker, reset_tracker, set_tracker
 from app.tools.search import SearchError, SearchNotConfiguredError, TavilySearchTool
 
 
@@ -122,3 +123,52 @@ def test_search_rejects_malformed_payload():
         asyncio.run(client.search("查询"))
 
     assert exc_info.value.retryable is False
+
+
+def test_search_retry_budget_records_and_caps_retries():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={"error": "slow down"})
+        return httpx.Response(200, json={"results": []})
+
+    client = TavilySearchTool(
+        make_settings(), transport=httpx.MockTransport(handler)
+    )
+    tracker = InterfaceRetryTracker(limit=1)
+    token = set_tracker(tracker)
+    try:
+        hits = asyncio.run(client.search("查询"))
+    finally:
+        reset_tracker(token)
+
+    assert hits == []
+    assert calls == 2
+    assert tracker.snapshot() == {"search": 1}
+
+
+def test_search_retry_budget_blocks_retry_when_exhausted():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500, json={"error": "down"})
+
+    client = TavilySearchTool(
+        make_settings(), transport=httpx.MockTransport(handler)
+    )
+    tracker = InterfaceRetryTracker(limit=1, counts={"search": 1})
+    token = set_tracker(tracker)
+    try:
+        with pytest.raises(SearchError) as exc_info:
+            asyncio.run(client.search("查询"))
+    finally:
+        reset_tracker(token)
+
+    assert "重试已达上限" in exc_info.value.message
+    assert exc_info.value.retryable is False
+    assert calls == 1
